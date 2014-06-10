@@ -1,0 +1,23 @@
+{
+  "name": "ozp-iwc-angular",
+  "version": "0.0.0",
+  "description": "An AngularJS wrapper around the Ozone IWC",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/ozone-development/ozp-iwc-angular.git"
+  },
+  "keywords": [
+    "angular",
+    "ozone",
+    "iwc"
+  ],
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/ozone-development/ozp-iwc-angular/issues"
+  },
+  "homepage": "https://github.com/ozone-development/ozp-iwc-angular",
+  "devDependencies": {
+    "grunt-contrib-concat": "~0.4.0",
+    "grunt": "~0.4.5"
+  }
+}
