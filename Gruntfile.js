@@ -3,7 +3,7 @@ var fs = require('fs');
 
 // Export to the Grunt CLI
 module.exports = function(grunt) {
-    
+
     // Local vars
     var IWC_PATH = 'ozp-iwc',
         IWC_NG = 'ozp-iwc-angular',
@@ -13,9 +13,10 @@ module.exports = function(grunt) {
         console.log('Grunt path ' + GRUNT_PATH);
 
     // Project configuration.
-    grunt.initConfig({
+    var projectConfig = {
         pkg: grunt.file.readJSON('package.json'),
-        iwcPkg: grunt.file.readJSON(IWC_PATH + '/package.json'),
+        iwcPkg: grunt.file.exists(IWC_PATH + '/package.json') &&
+                grunt.file.readJSON(IWC_PATH + '/package.json'),
         gitclone: {
             clone: {
                 options: {
@@ -127,13 +128,16 @@ module.exports = function(grunt) {
                 dest: '<%= output.owf7Js %>.min.js'
             }
         }
-    });
+    };
+
+    // Run init
+    grunt.initConfig(projectConfig);
 
     // Load plugins
     grunt.loadNpmTasks('grunt-git');
     grunt.loadNpmTasks('grunt-contrib-concat');
     grunt.loadNpmTasks('grunt-contrib-uglify');
-    
+
     // Custom tasks
     // Update the IWC via either a git clone or git pull
     grunt.registerTask('updateIwcGit', 'Update the local IWC with the latest code from Github', function() {
@@ -142,14 +146,20 @@ module.exports = function(grunt) {
             // Clone the IWC repo
             grunt.log.writeln('IWC path not found, cloning the repo into ' + IWC_PATH);
             grunt.task.run('gitclone');
-        } 
-        // Else, the path exists 
+            grunt.task.run('updateIwcPkgVar');
+        }
+        // Else, the path exists
         else {
             // Change directory and pull
             process.chdir(__dirname + '/' + IWC_PATH);
             grunt.log.writeln('IWC found. Starting git pull')
             grunt.task.run('gitpull');
         }
+    });
+
+    grunt.registerTask('updateIwcPkgVar', 'Once IWC_PATH exists reset iwcPkg variable', function() {
+        projectConfig.iwcPkg = grunt.file.readJSON(IWC_PATH + '/package.json');
+        grunt.initConfig(projectConfig);
     });
 
     // Default task(s).
