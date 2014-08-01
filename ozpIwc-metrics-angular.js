@@ -71,7 +71,11 @@ ozpIwc.util.structuredCloneSupport.cache=undefined;
  */
 ozpIwc.util.clone=function(value) {
 	if(Array.isArray(value) || typeof(value) === 'object') {
-		return JSON.parse(JSON.stringify(value));
+        try {
+            return JSON.parse(JSON.stringify(value));
+        } catch (e) {
+            console.log(e);
+        }
 	} else {
 		return value;
 	}
@@ -114,6 +118,44 @@ ozpIwc.util.objectContainsAll=function(haystack,needles,equal) {
     return true;
 };
 
+ozpIwc.util.parseQueryParams=function(query) {
+    query = query || window.location.search;
+    var params={};
+	var regex=/\??([^&=]+)=?([^&]*)/g;
+	var match;
+	while(match=regex.exec(query)) {
+		params[match[1]]=decodeURIComponent(match[2]);
+	}
+    return params;
+};
+
+ozpIwc.util.ajax = function (config) {
+
+    var result = new ozpIwc.AsyncAction();
+    var request = new XMLHttpRequest();
+
+    request.onreadystatechange = function() {
+        if (request.readyState !== 4) {
+            return;
+        }
+
+        if (request.status === 200) {
+            result.resolve("success", JSON.parse(this.responseText));
+        } else {
+            result.resolve("failure", this.statusText, this.responseText);
+        }
+    };
+    request.open(config.method, config.href, true);
+
+    if(config.method === "POST") {
+        request.send(config.data);
+    }
+    request.setRequestHeader("Content-Type", "application/json");
+    request.setRequestHeader("Cache-Control", "no-cache");
+    request.send();
+
+    return result;
+};
 /*
  * The MIT License (MIT) Copyright (c) 2012 Mike Ihbe
  * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated 
@@ -518,37 +560,17 @@ ozpIwc.metricsStats.ExponentiallyWeightedMovingAverage.prototype.rate = function
 
 var ozpIwc=ozpIwc || {};
 
-var ozpIwc=ozpIwc || {};
-ozpIwc.metricTypes=ozpIwc.metricTypes || {};
-
-/**
- * @typedef {object} ozpIwc.MetricType 
- * @property {function} get - returns the current value of the metric
- */
-
-ozpIwc.metricTypes.BaseMetric=function() {
-	this.value=0;
-};
-
-ozpIwc.metricTypes.BaseMetric.prototype.get=function() { 
-	return this.value; 
-};
-
-ozpIwc.metricTypes.BaseMetric.prototype.unit=function(val) { 
-	if(val) {
-		this.unit=val;
-		return this;
-	}
-	return this.unit; 
-};
-
-
 /**
  * @class
  * A repository of metrics
  */
 ozpIwc.MetricsRegistry=function() {
 	this.metrics={};
+    var self=this;
+    this.gauge('registry.metrics').set(function() {
+        return {'types':  Object.keys(self.metrics).length};
+    });
+
 };
 
 /**
@@ -647,8 +669,34 @@ ozpIwc.MetricsRegistry.prototype.toJson=function() {
 	return rv;
 };
 
-	
 ozpIwc.metrics=new ozpIwc.MetricsRegistry();
+
+var ozpIwc=ozpIwc || {};
+ozpIwc.metricTypes=ozpIwc.metricTypes || {};
+
+/**
+ * @typedef {object} ozpIwc.MetricType 
+ * @property {function} get - returns the current value of the metric
+ */
+
+ozpIwc.metricTypes.BaseMetric=function() {
+	this.value=0;
+};
+
+ozpIwc.metricTypes.BaseMetric.prototype.get=function() { 
+	return this.value; 
+};
+
+ozpIwc.metricTypes.BaseMetric.prototype.unit=function(val) { 
+	if(val) {
+		this.unit=val;
+		return this;
+	}
+	return this.unit; 
+};
+
+
+
 
 /**
  * @class
@@ -678,7 +726,7 @@ ozpIwc.metricTypes.Counter.prototype.dec=function(delta) {
 	return this.value-=(delta?delta:1);
 };
 
-
+ozpIwc.metricTypes=ozpIwc.metricTypes || {};
 /**
  * @callback ozpIwc.metricTypes.Gauge~gaugeCallback
  * @returns {ozpIwc.metricTypes.MetricsTree} 
@@ -699,15 +747,18 @@ ozpIwc.metricTypes.Gauge=function(metricsCallback) {
  * @returns {ozpIwc.metricTypes.Gauge} this
  */
 ozpIwc.metricTypes.Gauge.prototype.set=function(metricsCallback) { 
-	callback=metricsCallback; 
+	this.callback=metricsCallback;
 	return this;
 };
 /**
  * Executes the callback and returns a metrics tree.
  * @returns {ozpIwc.metricTypes.MetricsTree}
  */
-ozpIwc.metricTypes.Gauge.prototype.get=function() { 
-	return callback(); 
+ozpIwc.metricTypes.Gauge.prototype.get=function() {
+    if (this.callback) {
+        return this.callback();
+    }
+    return undefined;
 };
 
 /**
