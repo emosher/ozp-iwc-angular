@@ -567,8 +567,8 @@ var ozpIwc=ozpIwc || {};
 ozpIwc.MetricsRegistry=function() {
 	this.metrics={};
     var self=this;
-    this.gauge('registry.metrics').set(function() {
-        return {'types':  Object.keys(self.metrics).length};
+    this.gauge('registry.metrics.types').set(function() {
+        return Object.keys(self.metrics).length;
     });
 
 };
@@ -581,7 +581,12 @@ ozpIwc.MetricsRegistry=function() {
  * @returns {MetricType} - Null if the metric already exists of a different type.  Otherwise a reference to the metric.
  */
 ozpIwc.MetricsRegistry.prototype.findOrCreateMetric=function(name,type) {
-	var m= this.metrics[name] = this.metrics[name] || new type();
+	var m= this.metrics[name];
+    if(!m) {
+        m = this.metrics[name] = new type();
+        m.name=name;
+        return m;
+    }
 	if(m instanceof type){
 			return m;
 	} else {
@@ -669,6 +674,14 @@ ozpIwc.MetricsRegistry.prototype.toJson=function() {
 	return rv;
 };
 
+ozpIwc.MetricsRegistry.prototype.allMetrics=function() {
+    var rv=[];
+    for(var k in this.metrics) {
+        rv.push(this.metrics[k]);
+    }
+    return rv;
+};
+
 ozpIwc.metrics=new ozpIwc.MetricsRegistry();
 
 var ozpIwc=ozpIwc || {};
@@ -681,6 +694,8 @@ ozpIwc.metricTypes=ozpIwc.metricTypes || {};
 
 ozpIwc.metricTypes.BaseMetric=function() {
 	this.value=0;
+    this.name="";
+    this.unitName="";
 };
 
 ozpIwc.metricTypes.BaseMetric.prototype.get=function() { 
@@ -689,10 +704,10 @@ ozpIwc.metricTypes.BaseMetric.prototype.get=function() {
 
 ozpIwc.metricTypes.BaseMetric.prototype.unit=function(val) { 
 	if(val) {
-		this.unit=val;
+		this.unitName=val;
 		return this;
 	}
-	return this.unit; 
+	return this.unitName; 
 };
 
 
@@ -738,9 +753,10 @@ ozpIwc.metricTypes=ozpIwc.metricTypes || {};
  * A gauge is an externally defined set of metrics returned by a callback function
  * @param {ozpIwc.metricTypes.Gauge~gaugeCallback} metricsCallback
  */
-ozpIwc.metricTypes.Gauge=function(metricsCallback) {
+ozpIwc.metricTypes.Gauge=ozpIwc.util.extend(ozpIwc.metricTypes.BaseMetric,function(metricsCallback) {
+	ozpIwc.metricTypes.BaseMetric.apply(this,arguments);
 	this.callback=metricsCallback;
-};
+});
 /**
  * Set the metrics callback for this gauge.
  * @param {ozpIwc.metricTypes.Gauge~gaugeCallback} metricsCallback

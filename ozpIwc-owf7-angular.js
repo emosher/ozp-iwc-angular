@@ -567,8 +567,8 @@ var ozpIwc=ozpIwc || {};
 ozpIwc.MetricsRegistry=function() {
 	this.metrics={};
     var self=this;
-    this.gauge('registry.metrics').set(function() {
-        return {'types':  Object.keys(self.metrics).length};
+    this.gauge('registry.metrics.types').set(function() {
+        return Object.keys(self.metrics).length;
     });
 
 };
@@ -581,7 +581,12 @@ ozpIwc.MetricsRegistry=function() {
  * @returns {MetricType} - Null if the metric already exists of a different type.  Otherwise a reference to the metric.
  */
 ozpIwc.MetricsRegistry.prototype.findOrCreateMetric=function(name,type) {
-	var m= this.metrics[name] = this.metrics[name] || new type();
+	var m= this.metrics[name];
+    if(!m) {
+        m = this.metrics[name] = new type();
+        m.name=name;
+        return m;
+    }
 	if(m instanceof type){
 			return m;
 	} else {
@@ -669,6 +674,14 @@ ozpIwc.MetricsRegistry.prototype.toJson=function() {
 	return rv;
 };
 
+ozpIwc.MetricsRegistry.prototype.allMetrics=function() {
+    var rv=[];
+    for(var k in this.metrics) {
+        rv.push(this.metrics[k]);
+    }
+    return rv;
+};
+
 ozpIwc.metrics=new ozpIwc.MetricsRegistry();
 
 var ozpIwc=ozpIwc || {};
@@ -681,6 +694,8 @@ ozpIwc.metricTypes=ozpIwc.metricTypes || {};
 
 ozpIwc.metricTypes.BaseMetric=function() {
 	this.value=0;
+    this.name="";
+    this.unitName="";
 };
 
 ozpIwc.metricTypes.BaseMetric.prototype.get=function() { 
@@ -689,10 +704,10 @@ ozpIwc.metricTypes.BaseMetric.prototype.get=function() {
 
 ozpIwc.metricTypes.BaseMetric.prototype.unit=function(val) { 
 	if(val) {
-		this.unit=val;
+		this.unitName=val;
 		return this;
 	}
-	return this.unit; 
+	return this.unitName; 
 };
 
 
@@ -738,9 +753,10 @@ ozpIwc.metricTypes=ozpIwc.metricTypes || {};
  * A gauge is an externally defined set of metrics returned by a callback function
  * @param {ozpIwc.metricTypes.Gauge~gaugeCallback} metricsCallback
  */
-ozpIwc.metricTypes.Gauge=function(metricsCallback) {
+ozpIwc.metricTypes.Gauge=ozpIwc.util.extend(ozpIwc.metricTypes.BaseMetric,function(metricsCallback) {
+	ozpIwc.metricTypes.BaseMetric.apply(this,arguments);
 	this.callback=metricsCallback;
-};
+});
 /**
  * Set the metrics callback for this gauge.
  * @param {ozpIwc.metricTypes.Gauge~gaugeCallback} metricsCallback
@@ -1146,7 +1162,7 @@ ozpIwc.BasicAuthentication=function() {
 	this.roles={};
     var self = this;
     ozpIwc.metrics.gauge('security.authentication.roles').set(function() {
-        return {'roles': self.getRoleCount()};
+        return self.getRoleCount();
     });
 };
 
@@ -1218,7 +1234,7 @@ ozpIwc.BasicAuthorization=function(config) {
 
     var self = this;
     ozpIwc.metrics.gauge('security.authorization.roles').set(function() {
-        return {'roles':  self.getRoleCount()};
+        return self.getRoleCount();
     });
 };
 /**
@@ -1952,6 +1968,10 @@ ozpIwc.Participant=function() {
 	this.events.mixinOnOff(this);
 	this.securityAttributes={};
     this.msgId=0;
+    var fakeMeter=new ozpIwc.metricTypes.Meter();
+    this.sentPacketsMeter=fakeMeter;
+    this.receivedPacketsMeter=fakeMeter;
+    this.forbiddenPacketsMeter=fakeMeter;
 };
 
 /**
@@ -1965,12 +1985,13 @@ ozpIwc.Participant.prototype.receiveFromRouter=function(packetContext) {
         'object': packetContext.packet.permissions,
     })
         .success(function(){
-            ozpIwc.metrics.counter("transport.packets.delivered").inc();
+            self.receivedPacketsMeter.mark();
+
             self.receiveFromRouterImpl(packetContext);
         })
         .failure(function() {
             /** @todo do we send a "denied" message to the destination?  drop?  who knows? */
-            ozpIwc.metrics.counter("transport.packets.forbidden").inc();
+            self.forbiddenPacketsMeter.mark();
         });
 };
 
@@ -1994,6 +2015,11 @@ ozpIwc.Participant.prototype.connectToRouter=function(router,address) {
     this.router=router;
     this.securityAttributes.rawAddress=address;
     this.msgId=0;
+    this.metricRoot="participants."+ this.address.split(".").reverse().join(".");
+    this.sentPacketsMeter=ozpIwc.metrics.meter(this.metricRoot,"sentPackets").unit("packets");
+    this.receivedPacketsMeter=ozpIwc.metrics.meter(this.metricRoot,"receivedPackets").unit("packets");
+    this.forbiddenPacketsMeter=ozpIwc.metrics.meter(this.metricRoot,"forbiddenPackets").unit("packets");
+    this.events.trigger("connectedToRouter");
 };
 
 /**
@@ -2023,6 +2049,7 @@ ozpIwc.Participant.prototype.fixPacket=function(packet) {
  */
 ozpIwc.Participant.prototype.send=function(packet) {
     packet=this.fixPacket(packet);
+    this.sentPacketsMeter.mark();
     this.router.send(packet,this);
     return packet;
 };
@@ -2049,8 +2076,10 @@ ozpIwc.InternalParticipant=ozpIwc.util.extend(ozpIwc.Participant,function(config
 	this.name=config.name;
 
     var self = this;
-    ozpIwc.metrics.gauge('transport.internal.participants').set(function() {
-        return {'callbacks':  self.getCallbackCount()};
+    this.on("connectedToRouter",function() {
+        ozpIwc.metrics.gauge(self.metricRoot,"registeredCallbacks").set(function() {
+            return self.getCallbackCount();
+        });
     });
 });
 
@@ -2073,7 +2102,7 @@ ozpIwc.InternalParticipant.prototype.receiveFromRouterImpl=function(packetContex
 	var packet=packetContext.packet;
 	if(packet.replyTo && this.replyCallbacks[packet.replyTo]) {
 		if (!this.replyCallbacks[packet.replyTo](packet)) {
-            this.cancelCallback(msgId);
+            this.cancelCallback(packet.replyTo);
         }
 	} else {
 		this.events.trigger("receive",packet);
@@ -2150,7 +2179,11 @@ ozpIwc.TransportPacketContext.prototype.replyTo=function(response) {
     response.replyTo=response.replyTo || this.packet.msgId;
     response.src=response.src || this.packet.dst;
     response.dst=response.dst || this.packet.src;
-    this.router.send(response);
+    if(this.dstParticipant) {
+        this.dstParticipant.send(response);
+    } else{
+        this.router.send(response);
+    }
     return response;
 };
 
@@ -2187,80 +2220,6 @@ ozpIwc.TransportPacketContext.prototype.replyTo=function(response) {
  * @property {ozpIwc.TransportPacket} packet
  * @property {ozpIwc.NetworkPacket} rawPacket
  */
-/**
- * @class
- */
-ozpIwc.RouterWatchdog=ozpIwc.util.extend(ozpIwc.InternalParticipant,function(config) {
-    ozpIwc.InternalParticipant.apply(this,arguments);
-
-    this.participantType="routerWatchdog";
-    var self=this;
-    this.on("connected",function() {
-        this.name=this.router.self_id;
-    },this);
-
-    this.heartbeatFrequency=config.heartbeatFrequency || 10000;
-    var self=this;
-
-    this.timer=window.setInterval(function() {
-        var heartbeat={
-            dst: "names.api",
-            action: "set",
-            resource: "/router/" + self.router.self_id,
-            entity: { participants: {} }
-        };
-        for(var k in self.router.participants) {
-            heartbeat.entity.participants[k]=self.router.participants[k].heartbeatStatus();
-        }
-        self.send(heartbeat);
-    },this.heartbeatFrequency);
-});
-
-ozpIwc.RouterWatchdog.prototype.connectToRouter=function(router,address) {
-    ozpIwc.Participant.prototype.connectToRouter.apply(this,arguments);
-    this.name=router.self_id;
-    var self=this;
-
-    //register the router watchdog with the names api service
-    var value = ozpIwc.namesApi.findOrMakeValue({resource: '/address/' + self.address, contentType: "ozp-address-collection-v1+json"});
-    var packet = {
-        src: self.address,
-        entity: self,
-        dst: "names.api"
-    };
-    value.set(packet);
-
-    //register other participants with the names api service
-    router.on("registeredParticipant", function(event) {
-        var pAddress=event.participant.address || event.participant.electionAddress;
-        if (!pAddress) {
-            return;
-        }
-        var value = ozpIwc.namesApi.findOrMakeValue({resource: '/address/' + pAddress, contentType: "ozp-address-object-v1+json"});
-        var packet = {
-            src: pAddress,
-            entity: event.participant,
-            dst: "names.api"
-        };
-        value.set(packet);
-    });
-
-    //register multicast group memberships with the names api service
-    router.on("registeredMulticast", function(event) {
-        var reg=event.entity;
-        var value = ozpIwc.namesApi.findOrMakeValue({resource: '/multicast/' + reg.group, contentType: "ozp-multicast-object-v1+json"});
-        var packet = {
-            src: reg.address,
-            entity: reg.address,
-            dst: "names.api"
-        };
-        value.set(packet);
-    });
-};
-
-ozpIwc.RouterWatchdog.prototype.shutdown=function() {
-    window.clearInterval(this.timer);
-};
 
 /**
  * @class
@@ -2312,7 +2271,7 @@ ozpIwc.Router=function(config) {
 	this.registerParticipant(this.watchdog);
 
     ozpIwc.metrics.gauge('transport.router.participants').set(function() {
-        return {'participants':  self.getParticipantCount()};
+        return self.getParticipantCount();
     });
 };
 
@@ -2330,7 +2289,7 @@ ozpIwc.Router.prototype.getParticipantCount=function() {
 
 ozpIwc.Router.prototype.shutdown=function() {
     this.watchdog.shutdown();
-}
+};
 
 /**
  * Allows a listener to add a new participant.
@@ -2343,7 +2302,7 @@ ozpIwc.Router.prototype.registerParticipant=function(participant,packet) {
     packet = packet || {};
     var address;
     do {
-        address=ozpIwc.util.generateId() + "." + this.self_id;
+        address=ozpIwc.util.generateId()+"."+this.self_id;
     } while(this.participants.hasOwnProperty(address));
 
     var registerEvent=new ozpIwc.CancelableEvent({
@@ -2431,6 +2390,7 @@ ozpIwc.Router.prototype.registerMulticast=function(participant,multicastGroups) 
         var g=self.participants[groupName];
         if(!g) {
             g=self.participants[groupName]=new ozpIwc.MulticastParticipant(groupName);
+            g.connectToRouter(this,groupName);
         }
         g.addMember(participant);
         if (participant.address) {
@@ -2534,7 +2494,7 @@ ozpIwc.LeaderGroupParticipant=ozpIwc.util.extend(ozpIwc.Participant,function(con
 	this.leader=null;
 	this.leaderPriority=null;
 
-	this.participantType="leaderGroupMember";
+	this.participantType="leaderGroup";
 	this.name=config.name;
 	
 	this.on("startElection",function() {
@@ -2564,7 +2524,10 @@ ozpIwc.LeaderGroupParticipant=ozpIwc.util.extend(ozpIwc.Participant,function(con
         var queue = self.getElectionQueue();
         return {'queue': queue ? queue.length : 0};
     });
-	
+	this.on("connectedToRouter",function() {
+        this.router.registerMulticast(this,[this.electionAddress,this.name]);
+        this.startElection();
+    },this);
 });
 
 /**
@@ -2574,19 +2537,6 @@ ozpIwc.LeaderGroupParticipant=ozpIwc.util.extend(ozpIwc.Participant,function(con
  */
 ozpIwc.LeaderGroupParticipant.prototype.getElectionQueue=function() {
     return this.electionQueue;
-}
-
-/**
- * Override from the participant in order to register our multicast addresses
- * and start an election.
- * @param {type} router
- * @param {type} address
- * @returns {undefined}
- */
-ozpIwc.LeaderGroupParticipant.prototype.connectToRouter=function(router,address) {
-	ozpIwc.Participant.prototype.connectToRouter.apply(this,arguments);
-	this.router.registerMulticast(this,[this.electionAddress,this.name]);
-	this.startElection();
 };
 
 /**
@@ -2785,7 +2735,11 @@ ozpIwc.MulticastParticipant=ozpIwc.util.extend(ozpIwc.Participant,function(name)
  * @returns {Boolean}
  */
 ozpIwc.MulticastParticipant.prototype.receiveFromRouterImpl=function(packet) {
-	this.members.forEach(function(m) { m.receiveFromRouter(packet);});
+	this.members.forEach(function(m) {
+        // as we send to each member, update the context to make it believe that it's the only recipient
+        packet.dstParticipant=m;
+        m.receiveFromRouter(packet);
+    });
 	return false;
 };
 
@@ -2820,19 +2774,11 @@ ozpIwc.PostMessageParticipant=ozpIwc.util.extend(ozpIwc.Participant,function(con
 	this.credentials=config.credentials;
 	this.participantType="postMessageProxy";
     this.securityAttributes.origin=this.origin;
+    this.on("connectedToRouter",function() {
+        this.securityAttributes.sendAs=this.address;
+        this.securityAttributes.receiveAs=this.address;
+    },this);
 });
-
-/**
- * @override
- * @param {ozpIwc.Router} router
- * @param {string} address
- * @returns {boolean} true if this packet could have additional recipients
- */
-ozpIwc.PostMessageParticipant.prototype.connectToRouter=function(router,address) {
-    ozpIwc.Participant.prototype.connectToRouter.apply(this,arguments);
-    this.securityAttributes.sendAs=this.address;
-    this.securityAttributes.receiveAs=this.address;
-};
 
 /**
  * @override
@@ -2968,7 +2914,7 @@ ozpIwc.PostMessageParticipantListener=function(config) {
 	}, false);
 
     ozpIwc.metrics.gauge('transport.postMessageListener.participants').set(function() {
-        return {'participants': self.getParticipantCount()};
+        return self.getParticipantCount();
     });
 };
 
@@ -3023,6 +2969,83 @@ ozpIwc.PostMessageParticipantListener.prototype.receiveFromPostMessage=function(
 	}
 	participant.forwardFromPostMessage(packet,event);
 };
+
+/**
+ * @class
+ */
+ozpIwc.RouterWatchdog=ozpIwc.util.extend(ozpIwc.InternalParticipant,function(config) {
+    ozpIwc.InternalParticipant.apply(this,arguments);
+
+    this.participantType="routerWatchdog";
+    var self=this;
+    this.on("connected",function() {
+        this.name=this.router.self_id;
+    },this);
+
+    this.heartbeatFrequency=config.heartbeatFrequency || 10000;
+    var self=this;
+
+    this.timer=window.setInterval(function() {
+        var heartbeat={
+            dst: "names.api",
+            action: "set",
+            resource: "/router/" + self.router.self_id,
+            entity: { participants: {} }
+        };
+        for(var k in self.router.participants) {
+            heartbeat.entity.participants[k]=self.router.participants[k].heartbeatStatus();
+        }
+        self.send(heartbeat);
+    },this.heartbeatFrequency);
+    
+    this.on("connected",this.setupWatches,this);
+});
+
+ozpIwc.RouterWatchdog.prototype.setupWatches=function() {
+    this.name=this.router.self_id;
+    var self=this;
+
+    //register the router watchdog with the names api service
+    var value = ozpIwc.namesApi.findOrMakeValue({resource: '/address/' + self.address, contentType: "ozp-address-collection-v1+json"});
+    var packet = {
+        src: self.address,
+        entity: self,
+        dst: "names.api"
+    };
+    value.set(packet);
+
+    //register other participants with the names api service
+    this.router.on("registeredParticipant", function(event) {
+        var pAddress=event.participant.address || event.participant.electionAddress;
+        if (!pAddress) {
+            return;
+        }
+        var value = ozpIwc.namesApi.findOrMakeValue({resource: '/address/' + pAddress, contentType: "ozp-address-object-v1+json"});
+        var packet = {
+            src: pAddress,
+            entity: event.participant,
+            dst: "names.api"
+        };
+        value.set(packet);
+    });
+
+    //register multicast group memberships with the names api service
+    this.router.on("registeredMulticast", function(event) {
+        var reg=event.entity;
+        var value = ozpIwc.namesApi.findOrMakeValue({resource: '/multicast/' + reg.group, contentType: "ozp-multicast-object-v1+json"});
+        var packet = {
+            src: reg.address,
+            entity: reg.address,
+            dst: "names.api"
+        };
+        value.set(packet);
+    });
+};
+
+ozpIwc.RouterWatchdog.prototype.shutdown=function() {
+    window.clearInterval(this.timer);
+};
+
 
 /**
  * The Common API Base implements the API Common Conventions.  It is intended to be subclassed by
@@ -3103,6 +3126,10 @@ ozpIwc.CommonApiBase.prototype.notifyWatchers=function(node,changes) {
  * @param {ozpIwc.TransportPacket} packet
  */
 ozpIwc.CommonApiBase.prototype.findOrMakeValue=function(packet) {
+    if(packet.resource === null || packet.resource === undefined) {
+        // return a throw-away value
+        return new ozpIwc.CommonApiValue();
+    }
 	var node=this.data[packet.resource];
 	
 	if(!node) {
@@ -3137,7 +3164,17 @@ ozpIwc.CommonApiBase.prototype.createKey=function(prefix) {
 };
 
 /**
- * Accept a packet and do all of the pre/post routing checks.  This include
+* Route a packet to the appropriate handler.  The routing path is based upon
+ * the action and whether a resource is defined. If the handler does not exist, it is routed 
+ * to defaultHandler(node,packetContext)
+ * 
+ * Has Resource: handleAction(node,packetContext)
+ *
+ * No resource: rootHandleAction(node,packetContext)
+ * 
+ * Where "Action" is replaced with the packet's action, lowercase with first letter capitalized
+ * (e.g. "doSomething" invokes "handleDosomething")
+ * Note that node will usually be null for the rootHandlerAction calls.
  * <ul>
  * <li> Pre-routing checks	<ul>
  *		<li> Permission check</li>
@@ -3159,25 +3196,39 @@ ozpIwc.CommonApiBase.prototype.routePacket=function(packetContext) {
 		return;
 	}	
 	var handler;
-	if(packet.action) {
-		handler="handle" + packet.action.charAt(0).toUpperCase() + packet.action.slice(1).toLowerCase();
-	}
-	if(!handler || typeof(this[handler]) !== 'function') {
-		packetContext.replyTo({
-			'action': 'badAction',
-			'entity': packet.action
-		});
-        return;
-	}
-
     this.events.trigger("receive",packetContext);
+
+    if(packet.resource===null || packet.resource===undefined) {
+        handler="rootHandle";
+    } else {
+        handler="handle";
+    }
+    
+	if(packet.action) {
+		handler+=packet.action.charAt(0).toUpperCase() + packet.action.slice(1).toLowerCase();
+	} else {
+        handler="defaultHandler";
+    }
+    
+	if(!handler || typeof(this[handler]) !== 'function') {
+       handler="defaultHandler";
+	}
 
 	var node=this.findOrMakeValue(packetContext.packet);
 	this.invokeHandler(node,packetContext,this[handler]);
 	
 };
+
+ozpIwc.CommonApiBase.prototype.defaultHandler=function(node,packetContext) {
+    packetContext.replyTo({
+        'action': 'badAction',
+        'entity': packetContext.packet.action
+    });
+};
+
+
 ozpIwc.CommonApiBase.prototype.validateResource=function(node,packetContext) {
-	return packetContext.packet.resource;
+	return true;
 };
 
 ozpIwc.CommonApiBase.prototype.validatePreconditions=function(node,packetContext) {
@@ -3263,6 +3314,17 @@ ozpIwc.CommonApiBase.prototype.handleUnwatch=function(node,packetContext) {
 	node.unwatch(packetContext.packet);
 	
 	packetContext.replyTo({'action':'ok'});
+};
+
+/**
+ * @param {ozpIwc.CommonApiValue} node
+ * @param {ozpIwc.TransportPacketContext} packetContext
+ */
+ozpIwc.CommonApiBase.prototype.rootHandleList=function(node,packetContext) {
+    packetContext.replyTo({
+        'action':'ok',
+        'entity': Object.keys(this.data)
+    });
 };
 
 
@@ -3571,6 +3633,9 @@ ozpIwc.IntentsApi = ozpIwc.util.extend(ozpIwc.CommonApiBase, function (config) {
  * @returns {string} parsedResource.intentValueType - returns the value type given the resource path (capability, definition, handler)
  */
 ozpIwc.IntentsApi.prototype.parseResource = function (packetContext) {
+    if(!packetContext.packet.resource) {
+        return;
+    }
     var resourceSplit = packetContext.packet.resource.split('/');
     var result = {
         type: resourceSplit[1],
@@ -4150,7 +4215,7 @@ ozpIwc.NamesApiValue.prototype.set=function(packet) {
             this.version++;
         }
     }
-}
+};
 
 ozpIwc.NamesApiValue.prototype.deleteData=function(packet) {
     if (packet && packet.resource==='/me' && packet.src) {
@@ -4217,7 +4282,7 @@ ozpIwc.NamesApiValue.prototype.resourceRoot=function() {
         return res[1];
     }
     return null;
-}
+};
 
 var ozpIwc=ozpIwc || {};
 
@@ -4374,105 +4439,6 @@ ozpIwc.SystemApiValue.prototype.applicationId=function() {
 };
 
 
-var ozpIwc=ozpIwc || {};
-ozpIwc.owf7Backend=ozpIwc.owf7Backend || {};
-
-ozpIwc.owf7Backend.DataApiOwf7Storage = function() {
-	this.prefsUrl="/owf/prefs/preference/ozp/kvStoreApi";
-};
-
-ozpIwc.owf7Backend.DataApiOwf7Storage.prototype.load=function() {
-	var action=new ozpIwc.AsyncAction();
-    var request = new XMLHttpRequest();
-
-    request.onreadystatechange = function(){
-        if(this.readyState === 4) {
-            if(this.status >= 200 && this.status < 400) {
-                action.resolve("success", JSON.parse(this.responseText), this.status, this);
-            } else {
-                action.resolve("failure", this, this.status, this.responseText);
-            }
-        }
-    };
-    request.open('GET', this.prefsUrl, true);
-    return action;
-};
-
-ozpIwc.owf7Backend.DataApiOwf7Storage.prototype.save=function(data) {
-	var action=new ozpIwc.AsyncAction();
-    var request = new XMLHttpRequest();
-
-    request.onreadystatechange = function(){
-        if(this.readyState === 4) {
-            if(this.status >= 200 && this.status < 400) {
-                action.resolve("success", JSON.parse(this.responseText), this.status, this);
-            } else {
-                action.resolve("failure", this, this.status, this.responseText);
-            }
-        }
-    };
-    request.open('POST', this.prefsUrl, true);
-    request.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
-    request.send('_method=PUT&version=7.0.1-GA-v1&value='+encodeURIComponent(JSON.stringify(data)));
-    return action;
-};
-var ozpIwc=ozpIwc || {};
-
-if(ozpIwc.Peer) {
-	ozpIwc.defaultPeer=new ozpIwc.Peer();
-}
-
-if(ozpIwc.Router) {
-	ozpIwc.defaultRouter=new ozpIwc.Router({
-			peer:ozpIwc.defaultPeer
-		});
-}
-
-if(ozpIwc.LocalStorageLink) {
-	ozpIwc.defaultLocalStorageLink=new ozpIwc.KeyBroadcastLocalStorageLink({
-		peer: ozpIwc.defaultPeer
-	});
-//	ozpIwc.defaultLocalStorageLink=new ozpIwc.LocalStorageLink({
-//		peer: ozpIwc.defaultPeer
-//	});	
-}
-
-if(ozpIwc.PostMessageParticipantListener) {
-	ozpIwc.defaultPostMessageParticipantListener=new ozpIwc.PostMessageParticipantListener({
-		router: ozpIwc.defaultRouter
-	});
-}
-
-if(ozpIwc.BasicAuthorization) {
-	ozpIwc.authorization=new ozpIwc.BasicAuthorization();
-}
-
-if(ozpIwc.DataApi) {
-	ozpIwc.DataApi=new ozpIwc.LeaderGroupParticipant({
-		name: "keyValue.api",
-		target: new ozpIwc.DataApi({
-			storage: new ozpIwc.owf7Backend.DataApiOwf7Storage()
-		})		
-	});
-
-	ozpIwc.defaultRouter.registerParticipant(ozpIwc.DataApi);
-}
-//
-//if(ozpIwc.NamesApi) {
-//	ozpIwc.namesApi=new ozpIwc.LeaderGroupParticipant({
-//		name: "names.api",
-//		target: new ozpIwc.NamesApi()
-//	});
-//	ozpIwc.defaultRouter.registerParticipant(ozpIwc.namesApi);
-//}
-//
-//if(ozpIwc.IntentsApi) {
-//	ozpIwc.intentsApi=new ozpIwc.LeaderGroupParticipant({
-//		name: "intents.api",
-//		target: new ozpIwc.IntentsApi()
-//	});
-//	ozpIwc.defaultRouter.registerParticipant(ozpIwc.intentsApi);
-//}
 //Return the ozpIwc object
 return ozpIwc;
 });
