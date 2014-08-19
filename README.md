@@ -20,3 +20,11 @@ You are then able to use Angular's [Dependency Injection](https://docs.angularjs
 myApp.service('fooService', [ 'ozpIwc', function(ozpIwc) {
   // Do IWC stuff here
 }]);
+```
+
+## Testing
+The tests are currently dependent on ozp-iwc. Clone ozp-iwc and run ```grunt test```
+
+Next, in two separate terminals, run ```grunt connect:sender``` and ```grunt connect:receiver```
+
+Send text via the sender and see that it shows up in the receiver

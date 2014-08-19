@@ -19,5 +19,8 @@
     "test",
     "tests",
     "ozp-iwc"
-  ]
+  ],
+  "dependencies": {
+    "ozp-iwc": "ozone-development/ozp-iwc"
+  }
 }
