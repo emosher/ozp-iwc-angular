@@ -20,6 +20,7 @@ You are then able to use Angular's [Dependency Injection](https://docs.angularjs
 myApp.service('fooService', [ 'ozpIwc', function(ozpIwc) {
   // Do IWC stuff here
 }]);
+```
 
 ## Testing
 The tests are currently dependent on ozp-iwc. Clone ozp-iwc and run ```grunt test```
