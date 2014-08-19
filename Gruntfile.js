@@ -47,6 +47,28 @@ module.exports = function(grunt) {
         src: 'dist/js/ozpIwc-metrics-angular.js',
         dest: 'dist/js/ozpIwc-metrics-angular.min.js'
       }
+    },
+
+    // NOTE: must be running 'grunt test' in ozp-iwc first!!
+    // Then manually run grunt connect:sender in one terminal and
+    //    grunt connect:receiver in another
+    connect: {
+      sender: {
+        options: {
+          port: 9001,
+          base: ['dist','demo/sender'],
+          hostname: 'localhost',
+          keepalive: true
+        }
+      },
+      receiver: {
+        options: {
+          port: 9002,
+          base: ['dist', 'demo/receiver'],
+          hostname: 'localhost',
+          keepalive: true
+        }
+      }
     }
 
   };
