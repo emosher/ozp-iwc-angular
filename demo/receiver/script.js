@@ -8,8 +8,7 @@ angular.module('ozpIwcAngularReciever').controller('DemoController', function ($
 
     // IWC Set-up
     var client = new ozpIwc.Client({
-        // TODO include a demo without a dependency on IWC repo
-        peerUrl: 'http://127.0.0.1:13000' 
+        peerUrl: 'http://' + window.location.hostname + ':9001'
     });
 
     $scope.message = 'No data yet', $scope.connected = false;

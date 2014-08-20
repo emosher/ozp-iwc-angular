@@ -49,6 +49,42 @@ module.exports = function(grunt) {
       }
     },
 
+    copy: {
+      iframepeer: {
+        files: [
+          {
+            src: [ '<%= iwcJs %>/../iframe_peer.html' ],
+            dest: 'dist/',
+            cwd: '.',
+            expand: true,
+            flatten: true
+          }
+        ]
+      },
+      defaultwiring: {
+        files: [
+          {
+            src: [ '<%= iwcJs %>/defaultWiring.js' ],
+            dest: 'dist/js/',
+            cwd: '.',
+            expand: true,
+            flatten: true
+          }
+        ]
+      },
+      iwcbus: {
+        files: [
+          {
+            src: [ '<%= iwcJs %>/ozpIwc-bus.js' ],
+            dest: 'dist/js/',
+            cwd: '.',
+            expand: true,
+            flatten: true
+          }
+        ]
+      }
+    },
+
     // NOTE: must be running 'grunt test' in ozp-iwc first!!
     // Then manually run grunt connect:sender in one terminal and
     //    grunt connect:receiver in another
@@ -74,5 +110,5 @@ module.exports = function(grunt) {
   };
     grunt.initConfig(config);
 
-    grunt.registerTask('default', ['clean', 'concat', 'uglify']);
+    grunt.registerTask('default', ['clean', 'concat', 'uglify', 'copy']);
 };

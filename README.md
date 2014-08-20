@@ -23,8 +23,7 @@ myApp.service('fooService', [ 'ozpIwc', function(ozpIwc) {
 ```
 
 ## Testing
-The tests are currently dependent on ozp-iwc. Clone ozp-iwc and run ```grunt test```
 
-Next, in two separate terminals, run ```grunt connect:sender``` and ```grunt connect:receiver```
+In two separate terminals, run ```grunt connect:sender``` and ```grunt connect:receiver```
 
 Send text via the sender and see that it shows up in the receiver
