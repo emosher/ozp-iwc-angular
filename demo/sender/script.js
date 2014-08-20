@@ -11,8 +11,7 @@ angular.module('ozpIwcAngularSender').controller('DemoController', function ($sc
 
     // IWC Set-up
     var client = new ozpIwc.Client({
-        // TODO include a demo without a dependency on IWC repo
-        peerUrl: "http://127.0.0.1:13000" 
+        peerUrl: 'http://' + window.location.hostname + ':9001'
     });
 
     var pushRequest={
