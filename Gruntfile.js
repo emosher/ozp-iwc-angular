@@ -89,9 +89,17 @@ module.exports = function(grunt) {
     // Then manually run grunt connect:sender in one terminal and
     //    grunt connect:receiver in another
     connect: {
-      sender: {
+      ozonebus: {
         options: {
           port: 9001,
+          base: ['dist_iwc'],
+          hostname: 'localhost',
+          keepalive: true
+        }
+      },
+      sender: {
+        options: {
+          port: 9002,
           base: ['dist', 'dist_iwc', 'demo/sender'],
           hostname: 'localhost',
           keepalive: true
@@ -99,7 +107,7 @@ module.exports = function(grunt) {
       },
       receiver: {
         options: {
-          port: 9002,
+          port: 9003,
           base: ['dist', 'dist_iwc', 'demo/receiver'],
           hostname: 'localhost',
           keepalive: true
