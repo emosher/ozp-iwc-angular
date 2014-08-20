@@ -54,7 +54,7 @@ module.exports = function(grunt) {
         files: [
           {
             src: [ '<%= iwcJs %>/../iframe_peer.html' ],
-            dest: 'dist/',
+            dest: 'dist_iwc/',
             cwd: '.',
             expand: true,
             flatten: true
@@ -65,7 +65,7 @@ module.exports = function(grunt) {
         files: [
           {
             src: [ '<%= iwcJs %>/defaultWiring.js' ],
-            dest: 'dist/js/',
+            dest: 'dist_iwc/js/',
             cwd: '.',
             expand: true,
             flatten: true
@@ -76,7 +76,7 @@ module.exports = function(grunt) {
         files: [
           {
             src: [ '<%= iwcJs %>/ozpIwc-bus.js' ],
-            dest: 'dist/js/',
+            dest: 'dist_iwc/js/',
             cwd: '.',
             expand: true,
             flatten: true
@@ -92,7 +92,7 @@ module.exports = function(grunt) {
       sender: {
         options: {
           port: 9001,
-          base: ['dist','demo/sender'],
+          base: ['dist', 'dist_iwc', 'demo/sender'],
           hostname: 'localhost',
           keepalive: true
         }
@@ -100,7 +100,7 @@ module.exports = function(grunt) {
       receiver: {
         options: {
           port: 9002,
-          base: ['dist', 'demo/receiver'],
+          base: ['dist', 'dist_iwc', 'demo/receiver'],
           hostname: 'localhost',
           keepalive: true
         }
