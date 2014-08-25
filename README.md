@@ -23,9 +23,15 @@ myApp.service('fooService', [ 'ozpIwc', function(ozpIwc) {
 ```
 
 ## Testing
-
 First, launch the 'ozone bus': ```grunt connect:ozonebus```
 
 Then, in two other terminals, run ```grunt connect:sender``` and ```grunt connect:receiver```
 
 Send text via the sender and see that it shows up in the receiver
+
+## Updating
+To update using the latest version of ozp-iwc, run 
+```
+bower update
+grunt
+```
