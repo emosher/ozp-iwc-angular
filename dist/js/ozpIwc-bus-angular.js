@@ -2240,6 +2240,10 @@ ozpIwc.util.determineOrigin=function(url) {
         origin+= ":" + a.port;
     return origin;
 };
+
+ozpIwc.util.escapeRegex=function(str) {
+    return str.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+};
 (function() {
 var define, requireModule, require, requirejs;
 
@@ -6157,6 +6161,7 @@ ozpIwc.CommonApiBase.prototype.notifyWatchers=function(node,changes) {
     if(!changes) {
         return;
     }
+    this.events.trigger("changedNode",node,changes);
 	node.eachWatcher(function(watcher) {
 		// @TODO check that the recipient has permission to both the new and old values
 		var reply={
@@ -6366,7 +6371,10 @@ ozpIwc.CommonApiBase.prototype.addDynamicNode=function(node) {
 ozpIwc.CommonApiBase.prototype.defaultHandler=function(node,packetContext) {
     packetContext.replyTo({
         'response': 'badAction',
-        'entity': packetContext.packet.action
+        'entity': {
+            'action': packetContext.packet.action,
+            'originalRequest' : packetContext.packet
+        }
     });
 };
 
@@ -6665,28 +6673,49 @@ ozpIwc.IntentsApi.prototype.makeValue = function (packet) {
     // resource of form /majorType/minorType/action?/handler?
     var path=packet.resource.split(/\//);
     path.shift(); // shift off the empty element before the first slash
+    var self=this;
+    var createType=function(resource) {
+        var node=new ozpIwc.IntentsApiTypeValue({
+            resource: resource,
+            intentType: path[0] + "/" + path[1]                
+        });
+        self.addDynamicNode(node);
+        return node;
+    };
+    var createDefinition=function(resource) {
+        var type="/" +path[0]+"/" + path[1];
+        if(!self.data[type]) {
+            self.data[type]=createType(type);
+        }
+        var node=new ozpIwc.IntentsApiDefinitionValue({
+            resource: resource,
+            intentType: path[0]+"/" + path[1] + "/" + path[2],
+            intentAction: path[2]
+        });
+        self.addDynamicNode(node);
+        return node;
+    };
+    var createHandler=function(resource) {
+        var definition="/" +path[0]+"/" + path[1] + "/" + path[2];
+        if(!self.data[definition]) {
+            self.data[definition]=createDefinition(definition);
+        }
+        
+        return new ozpIwc.IntentsApiHandlerValue({
+            resource: resource,
+            intentType: path[0] + "/" + path[1],
+            intentAction: path[2]
+        });
+    };
+    
     switch (path.length) {
         case 2:
-            var node=new ozpIwc.IntentsApiTypeValue({
-                resource:packet.resource,
-                intentType: path[0] + "/" + path[1]                
-            });
-            this.addDynamicNode(node);
-            return node;
+            return createType(packet.resource);
         case 3:
-            var node=new ozpIwc.IntentsApiDefinitionValue({
-                resource:packet.resource,
-                intentType: path[0] + "/" + path[1],
-                intentAction: path[2]
-            });
-            this.addDynamicNode(node);
-            return node;
+
+            return createDefinition(packet.resource);
         case 4:
-            return new ozpIwc.IntentsApiHandlerValue({
-                resource:packet.resource,
-                intentType: path[0] + "/" + path[1],
-                intentAction: path[2]
-            });
+            return createHandler(packet.resource);
         default:
             throw new ozpIwc.ApiError("badResource","Invalid resource: " + packet.resource)
     }
@@ -6699,7 +6728,7 @@ ozpIwc.IntentsApi.prototype.makeValue = function (packet) {
  * @param {ozpIwc.TransportPacketContext} packetContext - the packet received by the router.
  */
 ozpIwc.IntentsApi.prototype.handleRegister = function (node, packetContext) {
-	var key=this.createKey(node.resource+"/");
+	var key=node.resource+"/"+packetContext.packet.src;
 
 	// save the new child
 	var childNode=this.findOrMakeValue({'resource':key});
@@ -6725,14 +6754,31 @@ ozpIwc.IntentsApi.prototype.handleRegister = function (node, packetContext) {
  * @param {ozpIwc.TransportPacketContext} packetContext - the packet received by the router.
  */
 ozpIwc.IntentsApi.prototype.handleInvoke = function (node, packetContext) {
+    if(typeof(node.getHandlers) !== "function") {
+        throw new ozpIwc.ApiError("badResource","Resource is not an invokable intent");
+    }
+    
+    var handlerNodes=node.getHandlers(packetContext);
+    
+    if(handlerNodes.length === 1) {
+        this.invokeIntentHandler(handlerNodes[0],packetContext);
+    } else {
+        this.chooseIntentHandler(handlerNodes,packetContext);
+    }
+};
+
+
+
+ozpIwc.IntentsApi.prototype.invokeIntentHandler = function (node, packetContext) {
     // check to see if there's an invokeIntent package
     var packet=ozpIwc.util.clone(node.entity.invokeIntent);
     
     // assign the entity and contentType from the packet Context
     packet.entity=ozpIwc.util.clone(packetContext.packet.entity);
     packet.contentType=packetContext.packet.contentType;
-    packet.permissions=packetContext.packet.entity;
+    packet.permissions=packetContext.packet.permissions;
     
+
     this.participant.send(packet,function(response) {
         var blacklist=['src','dst','msgId','replyTo'];
         var packet={};
@@ -6743,6 +6789,10 @@ ozpIwc.IntentsApi.prototype.handleInvoke = function (node, packetContext) {
         }
         packetContext.replyTo(packet);
     });
+};
+
+ozpIwc.IntentsApi.prototype.chooseIntentHandler = function (nodeList, packetContext) {
+    throw new ozpIwc.ApiError("noImplementation","Selecting an intent is not yet implemented");
 };
 
 
@@ -6758,7 +6808,8 @@ ozpIwc.IntentsApiDefinitionValue = ozpIwc.util.extend(ozpIwc.CommonApiValue, fun
     config.allowedContentTypes=["application/ozpIwc-intents-definition-v1+json"];
     config.contentType="application/ozpIwc-intents-definition-v1+json";
     ozpIwc.CommonApiValue.call(this, config);
-    this.pattern=new RegExp(this.resource+"/[^/]*");
+    this.pattern=new RegExp(ozpIwc.util.escapeRegex(this.resource)+"/[^/]*");
+    this.handlers=[];
     this.entity={
         type: config.intentType,
         action: config.intentAction,        
@@ -6772,9 +6823,14 @@ ozpIwc.IntentsApiDefinitionValue.prototype.isUpdateNeeded=function(node) {
 
 ozpIwc.IntentsApiDefinitionValue.prototype.updateContent=function(changedNodes) {
     this.version++;
+    this.handlers=changedNodes;
     this.entity.handlers=changedNodes.map(function(changedNode) { 
         return changedNode.resource; 
     });
+};
+
+ozpIwc.IntentsApiDefinitionValue.prototype.getHandlers=function(packetContext) {
+    return [this.handlers];
 };
 /**
  * The capability value for an intent. adheres to the ozp-intents-type-capabilities-v1+json content type.
@@ -6793,6 +6849,18 @@ ozpIwc.IntentsApiHandlerValue = ozpIwc.util.extend(ozpIwc.CommonApiValue, functi
         action: config.intentAction
     };
 });
+
+ozpIwc.IntentsApiHandlerValue.prototype.getHandlers=function(packetContext) {
+    return [this];
+};
+
+ozpIwc.IntentsApiHandlerValue.prototype.set=function(packet) {
+    ozpIwc.CommonApiValue.prototype.set.apply(this,arguments);
+    this.entity.invokeIntent = this.entity.invokeIntent  || {};
+    this.entity.invokeIntent.dst = this.entity.invokeIntent.dst || packet.src;
+    this.entity.invokeIntent.resource = this.entity.invokeIntent.resource || "/intents" + packet.resource;
+    this.entity.invokeIntent.action = this.entity.invokeIntent.action || "invoke";
+};
 /**
  * The capability value for an intent. adheres to the ozp-intents-type-capabilities-v1+json content type.
  * @class
@@ -6806,7 +6874,7 @@ ozpIwc.IntentsApiTypeValue = ozpIwc.util.extend(ozpIwc.CommonApiValue, function 
     config.contentType="application/ozpIwc-intents-contentType-v1+json";
 
     ozpIwc.CommonApiValue.apply(this, arguments);
-    this.pattern=new RegExp(this.resource+"/[^/]*");
+    this.pattern=new RegExp(ozpIwc.util.escapeRegex(this.resource)+"/[^/]*");
     this.entity={
         type: config.intentType,
         actions: []
@@ -6924,14 +6992,17 @@ var ozpIwc=ozpIwc || {};
 ozpIwc.SystemApi = ozpIwc.util.extend(ozpIwc.CommonApiBase,function(config) {
     ozpIwc.CommonApiBase.apply(this,arguments);
     
-    
     this.addDynamicNode(new ozpIwc.CommonApiCollectionValue({
         resource: "/application",
         pattern: /^\/application\/.*$/,
         contentType: "application/ozpIwc-application-list-v1+json"
     }));
     
+    this.on("changedNode",this.updateIntents,this);
+       
     this.loadFromServer("applications");
+    
+    
     // @todo populate user and system endpoints
     this.data["/user"]=new ozpIwc.CommonApiValue({
         resource: "/user",
@@ -6951,6 +7022,38 @@ ozpIwc.SystemApi = ozpIwc.util.extend(ozpIwc.CommonApiBase,function(config) {
     });    
 });
 
+
+ozpIwc.SystemApi.prototype.updateIntents=function(node,changes) {
+    if(!node.getIntentsRegistrations) {
+        return;
+    }
+    var intents=node.getIntentsRegistrations();
+    if(!intents) {
+        return;
+    }
+    intents.forEach(function(i) {
+        this.participant.send({
+            'dst' : "intents.api",
+            'src' : "system.api",
+            'action': "register",
+            'resource': "/"+i.type+"/"+i.action,
+            'contentType': "application/ozpIwc-intents-handler-v1+json",
+            'entity': {
+                'type': i.type,
+                'action': i.action,
+                'icon': i.icon,
+                'label': i.label,
+                '_links': node.entity['_links'],
+                'invokeIntent': {
+                    'action' : 'launch',
+                    'resource' : node.resource
+                }
+            }
+        });
+    },this);
+    
+};
+
 ozpIwc.SystemApi.prototype.findNodeForServerResource=function(serverObject,objectPath,rootPath) {
     var resource="/application" + objectPath.replace(rootPath,'');
     return this.findOrMakeValue({
@@ -6961,6 +7064,14 @@ ozpIwc.SystemApi.prototype.findNodeForServerResource=function(serverObject,objec
 };
 
 ozpIwc.SystemApi.prototype.makeValue = function(packet){
+    if(packet.resource.indexOf("/mailbox") === 0) {
+        return new ozpIwc.SystemApiMailboxValue({
+            resource: packet.resource, 
+            entity: packet.entity, 
+            contentType: packet.contentType
+        });
+    }
+        
     return new ozpIwc.SystemApiApplicationValue({
         resource: packet.resource, 
         entity: packet.entity, 
@@ -6978,8 +7089,28 @@ ozpIwc.SystemApi.prototype.handleDelete = function() {
     throw new ozpIwc.ApiError("badAction", "Cannot modify the system API");
 };
 
+ozpIwc.SystemApi.prototype.handleLaunch = function(node,packetContext) {
+    var key=this.createKey("/mailbox/");
+
+	// save the new child
+	var mailboxNode=this.findOrMakeValue({'resource':key});
+	mailboxNode.set(packetContext.packet);
+    
+    this.launchApplication(node,mailboxNode);
+    packetContext.replyTo({'action': "ok"});
+};
+
+ozpIwc.SystemApi.prototype.launchApplication=function(node,mailboxNode) {
+    var launchParams=[
+//        "ozpIwc.peer="+encodeURIComponent(window.location.protocol + "//" + window.location.host+window.location.pathname),
+        "ozpIwc.mailbox="+encodeURIComponent(mailboxNode.resource)
+    ];
+    
+    window.open(node.entity['_links'].describes.href,launchParams.join("&"));    
+};
 ozpIwc.SystemApiApplicationValue = ozpIwc.util.extend(ozpIwc.CommonApiValue,function(config) {
     ozpIwc.CommonApiValue.apply(this,arguments);
+    this.systemApi=config.systemApi;
 });
 
 
@@ -6987,8 +7118,15 @@ ozpIwc.SystemApiApplicationValue.prototype.deserialize=function(serverData) {
     this.entity=serverData.entity;
     this.contentType=serverData.contentType || this.contentType;
 	this.permissions=serverData.permissions || this.permissions;
-	this.version=serverData.version || this.version;
+	this.version=serverData.version || ++this.version;
 };
+
+ozpIwc.SystemApiApplicationValue.prototype.getIntentsRegistrations=function() {
+    return this.entity.intents;
+};
+ozpIwc.SystemApiMailboxValue = ozpIwc.util.extend(ozpIwc.CommonApiValue,function(config) {
+    ozpIwc.CommonApiValue.apply(this,arguments);
+});
 //# sourceMappingURL=ozpIwc-bus.js.map
 //Return the ozpIwc object
 return ozpIwc;
