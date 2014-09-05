@@ -92,7 +92,7 @@ module.exports = function(grunt) {
       ozonebus: {
         options: {
           port: 9001,
-          base: ['dist_iwc'],
+          base: ['dist_iwc', 'bower_components/ozp-data-schemas/mock'],
           hostname: 'localhost',
           keepalive: true
         }

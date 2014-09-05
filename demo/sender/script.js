@@ -25,7 +25,7 @@ angular.module('ozpIwcAngularSender').controller('DemoController', function ($sc
     client.on('connected', function () { 
 
         client.send(pushRequest, function(packet){
-            if(packet.action==="ok") {
+            if(packet.response==="ok") {
                 console.log("Request sucessful");
             } else {
                 console.log("Failed to push the data " + JSON.stringify(packet,null,2));

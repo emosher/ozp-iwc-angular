@@ -28,7 +28,7 @@ angular.module('ozpIwcAngularReciever').controller('DemoController', function ($
 
             console.log("RESPONSE RECIEVED ");
             console.dir(response);
-            if(response.action === 'changed'){
+            if(response.response === 'changed'){
                 $scope.message = response.entity.newValue;
                 $scope.$apply();
             }
