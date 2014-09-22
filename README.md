@@ -12,17 +12,18 @@ appropriate file from this repo. Typically you will use the Client file.
 In development, you should use non minified files like `ozpIwc-client-angular.js`. 
 In production, use the minified version, `ozpIwc-client-angular.min.js`.
 
-Then in your app module, declare the `ozpIwcAngular` as one of your dependencies.
+Then in your app module, declare the `ozpIwcClient` as one of your dependencies (
+you may also depend on `ozpIwcBus` and/or `ozpIwcMetrics`)
 
 ```javascript
-var myApp = angular.module('myApp', [ 'ozpIwcAngular' ]);
+var myApp = angular.module('myApp', [ 'ozpIwcClient' ]);
 ```
 
 You are then able to use Angular's [Dependency Injection](https://docs.angularjs.org/guide/di) 
 to access the IWC object. Such as:
 
 ```javascript
-myApp.service('fooService', [ 'ozpIwc', function(ozpIwc) {
+myApp.service('fooService', [ 'iwcClient', function(iwcClient) {
   // Do IWC stuff here
 }]);
 ```
