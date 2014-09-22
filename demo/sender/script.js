@@ -5,12 +5,12 @@ angular.module('ozpIwcAngularSender', [
     'ozpIwcAngular'
 ]);
 
-angular.module('ozpIwcAngularSender').controller('DemoController', function ($scope, ozpIwc) {
+angular.module('ozpIwcAngularSender').controller('DemoController', function ($scope, ozpIwcClient) {
 
     $scope.myData = '', $scope.connected = false;
 
     // IWC Set-up
-    var client = new ozpIwc.Client({
+    var client = new ozpIwcClient.Client({
         peerUrl: 'http://' + window.location.hostname + ':9001'
     });
 
