@@ -18,7 +18,7 @@ module.exports = function(grunt) {
     concat: {
       bus: {
         options: {
-          banner: 'angular.module(\'ozpIwcAngular\', []).factory(\'ozpIwcBus\', function () {\n',
+          banner: 'angular.module(\'ozpIwcBus\', []).factory(\'ozpIwcBus\', function () {\n',
           footer: '\n//Return the ozpIwc object\nreturn ozpIwc;\n});'
         },
         src: '<%= iwcJs %>/ozpIwc-bus.js',
@@ -26,7 +26,7 @@ module.exports = function(grunt) {
       },
       client: {
         options: {
-          banner: 'angular.module(\'ozpIwcAngular\', []).factory(\'ozpIwcClient\', function () {\n',
+          banner: 'angular.module(\'ozpIwcClient\', []).factory(\'ozpIwcClient\', function () {\n',
           footer: '\n//Return the ozpIwc object\nreturn ozpIwc;\n});'
         },
         src: '<%= iwcJs %>/ozpIwc-client.js',
@@ -34,7 +34,7 @@ module.exports = function(grunt) {
       },
       metrics: {
         options: {
-          banner: 'angular.module(\'ozpIwcAngular\', []).factory(\'ozpIwcMetrics\', function () {\n',
+          banner: 'angular.module(\'ozpIwcMetrics\', []).factory(\'ozpIwcMetrics\', function () {\n',
           footer: '\n//Return the ozpIwc object\nreturn ozpIwc;\n});'
         },
         src: '<%= iwcJs %>/ozpIwc-metrics.js',
