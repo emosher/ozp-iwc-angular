@@ -1,4 +1,4 @@
-angular.module('ozpIwcClient', []).factory('ozpIwcClient', function () {
+angular.module('ozpIwcClient', []).factory('iwcClient', function () {
 /** @namespace */
 var ozpIwc=ozpIwc || {};
 

@@ -1,4 +1,4 @@
-angular.module('ozpIwcMetrics', []).factory('ozpIwcMetrics', function () {
+angular.module('ozpIwcMetrics', []).factory('iwcMetrics', function () {
 /** @namespace */
 var ozpIwc=ozpIwc || {};
 

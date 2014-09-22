@@ -1,13 +1,13 @@
 'use strict';
 // Declare app module
 angular.module('ozpIwcAngularReciever', [
-    'ozpIwcAngular'
+    'ozpIwcClient'
 ]);
 
-angular.module('ozpIwcAngularReciever').controller('DemoController', function ($scope, ozpIwcClient) {
+angular.module('ozpIwcAngularReciever').controller('DemoController', function ($scope, iwcClient) {
 
     // IWC Set-up
-    var client = new ozpIwcClient.Client({
+    var client = new iwcClient.Client({
         peerUrl: 'http://' + window.location.hostname + ':9001'
     });
 
