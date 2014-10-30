@@ -3413,6 +3413,9 @@ ozpIwc.util.ajax = function (config) {
                 request.setRequestHeader(header.name, header.value);
             });
         }
+        //Setting username and password as params to open() per the API does not work. setting them
+        //explicitly in the Authorization header works (but only for BASIC authentication)
+        request.setRequestHeader("Authorization", "Basic " + btoa(config.user + ":" + config.password));
 
         request.onload = function () {
             try {
@@ -5460,7 +5463,12 @@ ozpIwc.InternalParticipant.prototype.getCallbackCount=function() {
 ozpIwc.InternalParticipant.prototype.receiveFromRouterImpl=function(packetContext) {
 	var packet=packetContext.packet;
 	if(packet.replyTo && this.replyCallbacks[packet.replyTo]) {
-		if (!this.replyCallbacks[packet.replyTo](packet)) {
+        var cancel = false;
+        function done() {
+            cancel = true;
+        }
+        this.replyCallbacks[packet.replyTo](packet,done);
+		if (cancel) {
             this.cancelCallback(packet.replyTo);
         }
 	} else if (packet.dst === "$bus.multicast"){
@@ -7620,8 +7628,8 @@ ozpIwc.CommonApiBase.prototype.findNodeForServerResource=function(object,objectP
             }
             break;
         case ozpIwc.linkRelPrefix + ':application':
-            if (object.uuid) {
-                resource += 'application/' + object.uuid;
+            if (object.id) {
+                resource += 'application/' + object.id;
             }
             break;
         case ozpIwc.linkRelPrefix + ':system':
@@ -7631,7 +7639,9 @@ ozpIwc.CommonApiBase.prototype.findNodeForServerResource=function(object,objectP
             resource += 'user' + (object.username ? '/'+object.username : '');
             break;
         case ozpIwc.linkRelPrefix + ':user-data':
-            resource += 'data';
+            if (object.key) {
+                resource += object.key;
+            }
             break;
         default:
             resource+= 'FIXME_UNKNOWN_ENDPOINT_' + endpoint.name;
@@ -8584,6 +8594,36 @@ ozpIwc.Endpoint.prototype.put=function(resource, data, requestHeaders) {
 };
 
 /**
+ *
+ * Performs an AJAX request of DELETE for specified resource href.
+ *
+ * @method put
+ * @param {String} resource
+ * @param [Object] requestHeaders
+ * @param {String} requestHeaders.name
+ * @param {String} requestHeaders.value
+ *
+ * @returns {Promise}
+ */
+ozpIwc.Endpoint.prototype.delete=function(resource, data, requestHeaders) {
+    var self=this;
+
+    return this.endpointRegistry.loadPromise.then(function() {
+        if(resource.indexOf(self.baseUrl)!==0) {
+            resource=self.baseUrl + resource;
+        }
+        return ozpIwc.util.ajax({
+            href:  resource,
+            method: 'DELETE',
+            headers: requestHeaders,
+            withCredentials: true,
+            user: ozpIwc.marketplaceUsername,
+            password: ozpIwc.marketplacePassword
+        });
+    });
+};
+
+/**
  * Sends AJAX requests to PUT the specified nodes into the endpoint.
  * @todo PUTs each node individually. Currently sends to a fixed api point switch to using the node.self endpoint and remove fixed resource
  * @method saveNodes
@@ -8635,7 +8675,9 @@ ozpIwc.EndpointRegistry=function(config) {
     this.loadPromise=ozpIwc.util.ajax({
         href: apiRoot,
         method: 'GET',
-        withCredentials: true
+        withCredentials: true,
+        user: ozpIwc.marketplaceUsername,
+        password: ozpIwc.marketplacePassword
     }).then(function(data) {
         for (var linkEp in data._links) {
             if (linkEp !== 'self') {
@@ -8700,8 +8742,8 @@ ozpIwc.initEndpoints=function(apiRoot) {
  * @params {ozpIwc.Participant} config.participant - the participant used for the Api communication
  */
 ozpIwc.DataApi = ozpIwc.util.extend(ozpIwc.CommonApiBase,function(config) {
-	ozpIwc.CommonApiBase.apply(this,arguments);
-	this.endpointUrl=ozpIwc.linkRelPrefix+":user-data";
+    ozpIwc.CommonApiBase.apply(this,arguments);
+    this.endpointUrl=ozpIwc.linkRelPrefix+":user-data";
 });
 
 /**
@@ -8738,12 +8780,12 @@ ozpIwc.DataApi.prototype.makeValue = function(packet){
  * @returns {ozpIwc.DataApiValue} The childNode created.
  */
 ozpIwc.DataApi.prototype.createChild=function(node,packetContext) {
-	var key=this.createKey(node.resource+"/");
+    var key=this.createKey(node.resource+"/");
 
-	// save the new child
-	var childNode=this.findOrMakeValue({'resource':key});
-	childNode.set(packetContext.packet);
-	return childNode;
+    // save the new child
+    var childNode=this.findOrMakeValue({'resource':key});
+    childNode.set(packetContext.packet);
+    return childNode;
 };
 
 /**
@@ -8761,7 +8803,7 @@ ozpIwc.DataApi.prototype.createChild=function(node,packetContext) {
  * @param {ozpIwc.TransportPacketContext} packetContext Packet context of the list request.
  */
 ozpIwc.DataApi.prototype.handleList=function(node,packetContext) {
-	packetContext.replyTo({
+    packetContext.replyTo({
         'response': 'ok',
         'entity': node.listChildren()
     });
@@ -8787,11 +8829,15 @@ ozpIwc.DataApi.prototype.handleList=function(node,packetContext) {
  * @param {ozpIwc.TransportPacketContext} packetContext - The packet context of which the child is constructed from.
  */
 ozpIwc.DataApi.prototype.handleAddchild=function(node,packetContext) {
-	var childNode=this.createChild(node,packetContext);
+    var childNode=this.createChild(node,packetContext);
 
-	node.addChild(childNode.resource);
+    node.addChild(childNode.resource);
 
-	packetContext.replyTo({
+    if (node && packetContext.packet.entity.persist) {
+        this.persistNode(node);
+    }
+
+    packetContext.replyTo({
         'response':'ok',
         'entity' : {
             'resource': childNode.resource
@@ -8815,10 +8861,65 @@ ozpIwc.DataApi.prototype.handleAddchild=function(node,packetContext) {
  */
 ozpIwc.DataApi.prototype.handleRemovechild=function(node,packetContext) {
     node.removeChild(packetContext.packet.entity.resource);
-	// delegate to the handleGet call
-	packetContext.replyTo({
+    if (node && packetContext.packet.entity.persist) {
+        this.persistNode(node);
+    }
+    // delegate to the handleGet call
+    packetContext.replyTo({
         'response':'ok'
     });
+};
+
+
+/**
+ * Overrides the implementation of ozpIwc.CommonApiBase.handleSet
+ * to add a node to persistent storage after setting it's value.
+ *
+ * @method handleSet
+ * @param {ozpIwc.DataApiValue} node
+ * @param {ozpIwc.PacketContext} packetContext
+ */
+ozpIwc.DataApi.prototype.handleSet=function(node,packetContext) {
+    ozpIwc.CommonApiBase.prototype.handleSet.apply(this,arguments);
+    if (node && packetContext.packet.entity.persist) {
+        this.persistNode(node);
+    }
+};
+
+/**
+ * Overrides the implementation of ozpIwc.CommonApiBase.handleDelete
+ * to delete a node from persistent storage before deleting it's value.
+ *
+ * @method handleDelete
+ * @param {ozpIwc.DataApiValue} node
+ */
+ozpIwc.DataApi.prototype.handleDelete=function(node) {
+    if (node && node.persist) {
+        this.deleteNode(node);
+    }
+    ozpIwc.CommonApiBase.prototype.handleDelete.apply(this,arguments);
+};
+
+/**
+ * 	Saves an individual node to the persistent data store
+ *
+ * 	@method persistNode
+ * 	@param {ozpIwc.DataApiValue} node
+ */
+ozpIwc.DataApi.prototype.persistNode=function(node) {
+    var endpointref= ozpIwc.endpoint(this.endpointUrl);
+    endpointref.put(node.resource, JSON.stringify(node.entity));
+};
+
+/**
+ * 	Deletes an individual node from the persistent data store
+ *
+ * 	@method deleteNode
+ * 	@param {ozpIwc.DataApiValue} node
+ */
+ozpIwc.DataApi.prototype.deleteNode=function(node) {
+    var endpointref= ozpIwc.endpoint(this.endpointUrl);
+    endpointref.delete(node.resource);
 };
 
 /**
@@ -8828,20 +8929,20 @@ ozpIwc.DataApi.prototype.handleRemovechild=function(node,packetContext) {
  * 	@method persistNodes
  */
 ozpIwc.DataApi.prototype.persistNodes=function() {
-	// collect list of nodes to persist, send to server, reset persist flag
-	var nodes=[];
-	for (var node in this.data) {
-		if ((this.data[node].dirty === true) &&
-			(this.data[node].persist === true)) {
-			nodes[nodes.length]=this.data[node].serialize();
-			this.data[node].dirty = false;
-		}
-	}
-	// send list of objects to endpoint ajax call
-	if (nodes) {
-		var endpointref= ozpIwc.EndpointRegistry.endpoint(this.endpointUrl);
-		endpointref.saveNodes(nodes);
-	}
+    // collect list of nodes to persist, send to server, reset persist flag
+    var nodes=[];
+    for (var node in this.data) {
+        if ((this.data[node].dirty === true) &&
+            (this.data[node].persist === true)) {
+            nodes[nodes.length]=this.data[node].serialize();
+            this.data[node].dirty = false;
+        }
+    }
+    // send list of objects to endpoint ajax call
+    if (nodes) {
+        var endpointref= ozpIwc.EndpointRegistry.endpoint(this.endpointUrl);
+        endpointref.saveNodes(nodes);
+    }
 };
 
 /**
@@ -9252,7 +9353,7 @@ ozpIwc.IntentsApi.prototype.invokeIntentHandler = function (handlerNode, packetC
     };
 
     var self = this;
-    this.participant.send(packet,function(response) {
+    this.participant.send(packet,function(response,done) {
         var blacklist=['src','dst','msgId','replyTo'];
         var packet={};
         for(var k in response) {
@@ -9267,6 +9368,7 @@ ozpIwc.IntentsApi.prototype.invokeIntentHandler = function (handlerNode, packetC
             entity: packet
         });
         packetContext.replyTo(packet);
+        done();
     });
 };
 
