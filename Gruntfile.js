@@ -6,8 +6,6 @@ module.exports = function(grunt) {
   require('load-grunt-tasks')(grunt);
   var iwcConfigOverides={
       apiRootUrl:"https://www.owfgoss.org/ng/dev-alpha/mp/api",
-      basicAuthUsername:"testAdmin1",
-      basicAuthPassword:"password"
   };
   var config = {
     pkg: grunt.file.readJSON('package.json'),
