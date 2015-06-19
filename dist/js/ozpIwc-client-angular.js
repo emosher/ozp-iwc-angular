@@ -2618,7 +2618,7 @@ define("promise/utils",
   });
 requireModule('promise/polyfill').polyfill();
 }());
-ozpIwc = ozpIwc || {};
+var ozpIwc = ozpIwc || {};
 
 ozpIwc.apiMap = {
     "data.api" : { 'address': 'data.api',
@@ -2632,7 +2632,659 @@ ozpIwc.apiMap = {
     },
     "system.api" : { 'address': 'system.api',
         'actions': ["get","set","delete","watch","unwatch","list","bulkGet","launch"]
+    },
+    "locks.api" : { 'address' : 'locks.api',
+        'actions': ["get","watch","unwatch","list","lock","unlock"]
     }
+};
+/*
+ * @method ozpIwc.ApiPromiseMixin
+ * @static
+ * Augments a participant or connection that supports basic IWC communications
+ * functions for sending and receiving.
+ * @uses ozpIwc.Events
+ * @param {ozpIwc.Participant} participant
+ */
+ozpIwc.ApiPromiseMixin=function(participant,autoConnect) {
+    autoConnect = (typeof autoConnect === "undefined" || autoConnect);
+
+    participant.address = participant.address || "$nobody";
+    participant.connect = participant.connect ||  function(){
+        participant.connectPromise = Promise.resolve();
+
+        return participant.connectPromise;
+    };
+
+    if(!participant.events) {
+        participant.events = new ozpIwc.Event();
+        participant.events.mixinOnOff(participant);
+    }
+
+    var mixins = ozpIwc.ApiPromiseMixin.getCore();
+    for(var i in mixins){
+        participant[i] = mixins[i];
+    }
+
+    participant.readLaunchParams(window.name);
+    participant.readLaunchParams(window.location.search);
+    participant.readLaunchParams(window.location.hash);
+
+    ozpIwc.ApiPromiseMixin.registerEvents(participant);
+
+    participant.constructApiFunctions();
+
+    if(autoConnect){
+        participant.connect();
+    }
+};
+
+/**
+ * Registers event listeners for the participant.  Listens for the following events: disconnect.
+ * @method registerEvents
+ * @static
+ * @param {ozpIwc.Participant} participant
+ */
+ozpIwc.ApiPromiseMixin.registerEvents = function(participant){
+    participant.on("disconnect",function(){
+        participant.promiseCallbacks={};
+        participant.registeredCallbacks={};
+        window.removeEventListener("message",participant.postMessageHandler,false);
+        participant.connectPromise = null;
+    });
+};
+
+/**
+ * A factory for the apiPromise functionality.
+ *
+ * @method getCore
+ * @static
+ * @returns {Object}
+ */
+ozpIwc.ApiPromiseMixin.getCore = function() {
+    return {
+
+        /**
+         * @property promiseCallbacks
+         * @type Object
+         * @default {}
+         */
+        promiseCallbacks: {},
+
+        /**
+         * @property msgIdSequence
+         * @type Number
+         * @default 0
+         */
+        msgIdSequence: 0,
+
+        /**
+         * @property receivedPackets
+         * @type Number
+         * @default 0
+         */
+        receivedPackets: 0,
+
+        /**
+         * @property receivedBytes
+         * @type Number
+         * @default 0
+         */
+        receivedBytes: 0,
+
+        /**
+         * @property sentPackets
+         * @type Number
+         * @default 0
+         */
+        sentPackets: 0,
+
+        /**
+         * @property sentBytes
+         * @type Number
+         * @default 0
+         */
+        sentBytes: 0,
+
+        /**
+         * The epoch time the Client was instantiated.
+         * @property startTime
+         * @type Number
+         */
+        startTime: ozpIwc.util.now(),
+
+        /**
+         * A map of available apis and their actions.
+         * @property apiMap
+         * @type Object
+         */
+        apiMap: ozpIwc.apiMap || {},
+
+        /**
+         * @property wrapperMap
+         * @type Object
+         * @default {}
+         */
+        wrapperMap: {},
+
+        /**
+         * @property preconnectionQueue
+         * @type Array
+         * @default []
+         */
+        preconnectionQueue: [],
+
+        /**
+         * @property launchParams
+         * @type Object
+         * @default {}
+         */
+        launchParams: {},
+
+        /**
+         * @property watchMsgMap
+         * @type Object
+         * @default {}
+         */
+        watchMsgMap: {},
+
+        /**
+         * @property registeredCallbacks
+         * @type Object
+         * @default {}
+         */
+        registeredCallbacks: {},
+
+        /**
+         * @property launchedIntents
+         * @type Array
+         * @default []
+         */
+        launchedIntents: [],
+
+        /**
+         * Returns whether or not the participant is connected to the IWC bus.
+         *
+         * @method isConnected
+         * @returns {Boolean}
+         */
+        isConnected: function(){
+            return this.address !== "$nobody";
+        },
+
+        /**
+         * Parses launch parameters based on the raw string input it receives.
+         *
+         * @method readLaunchParams
+         * @param {String} rawString
+         */
+        readLaunchParams: function(rawString) {
+            // of the form ozpIwc.VARIABLE=VALUE, where:
+            //   VARIABLE is alphanumeric + "_"
+            //   VALUE does not contain & or #
+            var re=/ozpIwc.(\w+)=([^&#]+)/g;
+            var m;
+            while((m=re.exec(rawString)) !== null) {
+                var params = decodeURIComponent(m[2]);
+                try{
+                    params = JSON.parse(params);
+                } catch(e){
+                    // ignore the errors and just pass through the string
+                }
+                this.launchParams[m[1]]=params;
+            }
+        },
+
+        /**
+         * Receive a packet from the connected peer.  If the packet is a reply, then
+         * the callback for that reply is invoked.  Otherwise, it fires a receive event
+         *
+         * Fires:
+         *     - {{#crossLink "ozpIwc.Client/receive:event}}{{/crossLink}}
+         *
+         * @method receive
+         * @protected
+         * @param {ozpIwc.TransportPacket} packetContext
+         */
+        receiveFromRouterImpl: function (packetContext) {
+            var handled = false;
+
+            // If no packet, it is likely a $transport packet.
+            var packet = packetContext.packet || packetContext;
+            //Try and handle this packet as a reply message
+            if (packet.src ==="$transport" || packet.replyTo && this.promiseCallbacks[packet.replyTo]) {
+
+                var replyCancel = false;
+                var replyDone = function () {
+                    replyCancel = true;
+                };
+                this.promiseCallbacks[packet.replyTo](packet, replyDone);
+
+                if (replyCancel) {
+                    this.cancelPromiseCallback(packet.replyTo);
+                    handled = true;
+                }
+
+            }
+
+            //Try and handle this packet as callback message
+            if (!handled && packet.replyTo && this.registeredCallbacks[packet.replyTo]) {
+
+                var registeredCancel = false;
+                var registeredDone = function () {
+                    registeredCancel = true;
+                };
+
+                handled = this.registeredCallbacks[packet.replyTo](packet, registeredDone);
+                if (registeredCancel) {
+                    if (this.watchMsgMap[packet.replyTo] && this.watchMsgMap[packet.replyTo].action === "watch") {
+                        this.api(this.watchMsgMap[packet.replyTo].dst).unwatch(this.watchMsgMap[packet.replyTo].resource);
+                    }
+                    this.cancelRegisteredCallback(packet.replyTo);
+                }
+            }
+            if(!handled){
+                // Otherwise trigger "receive" for someone to handle it
+                this.events.trigger("receive",packetContext);
+            }
+        },
+
+        /**
+         * Builds the client api calls from the values in client.apiMap
+         *
+         * @method constructApiFunctions
+         */
+        constructApiFunctions: function () {
+            for (var api in this.apiMap) {
+                var apiObj = this.apiMap[api];
+                var apiFuncName = apiObj.address.replace('.api', '');
+
+                //prevent overriding client constructed fields, but allow updating of constructed APIs
+                if (!this.hasOwnProperty(apiFuncName) || this.apiMap[api].functionName === apiFuncName) {
+                    // wrap this in a function to break the closure
+                    // on apiObj.address that would otherwise register
+                    // everything for the last api in the list
+                    /*jshint loopfunc:true*/
+                    (function (self, addr) {
+                        self[apiFuncName] = function () {
+                            return self.api(addr);
+                        };
+                        self.apiMap[addr] = self.apiMap[addr] || {};
+                        self.apiMap[addr].functionName = apiFuncName;
+                        self.updateApi(addr);
+                    })(this, apiObj.address);
+                }
+            }
+        },
+
+        /**
+         * Calls the names.api to gather the /api/* resources to gain knowledge of available api actions of the current bus.
+         *
+         * @method gatherApiInformation
+         * @returns {Promise}
+         */
+        gatherApiInformation: function () {
+            var self = this;
+            // gather api information
+            return this.send({
+                dst: "names.api",
+                action: "get",
+                resource: "/api"
+            }).then(function (reply) {
+                if (reply.response === 'ok') {
+                    return reply.entity;
+                } else {
+                    throw reply.response;
+                }
+            }).then(function (apis) {
+                var promiseArray = [];
+                apis.forEach(function (api) {
+                    var promise = self.send({
+                        dst: "names.api",
+                        action: "get",
+                        resource: api
+                    }).then(function (res) {
+                        if (res.response === 'ok') {
+                            var name = api.replace('/api/', '');
+                            self.apiMap[name] = self.apiMap[name] || {};
+                            self.apiMap[name].address = name;
+                            self.apiMap[name].actions = res.entity.actions;
+                        } else {
+                            throw res.response;
+                        }
+                    });
+                    promiseArray.push(promise);
+                });
+                return Promise.all(promiseArray);
+            });
+        },
+
+        /**
+         * Cancel a reply callback registration.
+         * @method cancelPromiseCallback
+         * @param (String} msgId The packet replyTo ID for which the callback was registered.
+         *
+         * @return {Boolean} True if the cancel was successful, otherwise false.
+         */
+        cancelPromiseCallback: function (msgId) {
+            var success = false;
+            if (msgId) {
+                delete this.promiseCallbacks[msgId];
+                success = true;
+            }
+            return success;
+        },
+
+        /**
+         * Cancel a watch callback registration.
+         *
+         * @method cancelRegisteredCallback
+         * @param (String} msgId The packet replyTo ID for which the callback was registered.
+         *
+         * @return {Boolean} True if the cancel was successful, otherwise false.
+         */
+        cancelRegisteredCallback: function (msgId) {
+            var success = false;
+            if (msgId) {
+                delete this.registeredCallbacks[msgId];
+                delete this.watchMsgMap[msgId];
+                success = true;
+            }
+            return success;
+        },
+
+        /**
+         * Registers callbacks
+         *
+         * @method on
+         * @param {String} event The event to call the callback on.
+         * @param {Function} callback The function to be called.
+         *
+         */
+        on: function (event, callback) {
+            if (event === "connected" && this.isConnected()) {
+                callback(this);
+                return;
+            }
+            return this.events.on.apply(this.events, arguments);
+        },
+
+        /**
+         * De-registers callbacks
+         *
+         * @method off
+         * @param {String} event The event to call the callback on.
+         * @param {Function} callback The function to be called.
+         *
+         */
+        off: function (event, callback) {
+            return this.events.off.apply(this.events, arguments);
+        },
+
+        /**
+         * Handles intent invocation packets. Communicates back with the intents.api to operate the in flight intent state
+         * machine.
+         *
+         * @method intentInvocationHandling
+         * @param resource {String} The resource of the packet that sent the intent invocation
+         * @param intentResource {String} The in flight intent resource, used internally to operate the in flight intent state machine
+         * @param callback {Function} The intent handler's callback function
+         * @returns {Promise}
+         */
+        intentInvocationHandling: function (resource, intentResource, intentEntity, callback) {
+            var self = this;
+            var res;
+            var promiseChain;
+            callback = callback || function(){};
+
+            if(intentEntity) {
+                promiseChain = Promise.resolve(intentEntity);
+            } else {
+                promiseChain = self.send({
+                    dst: "intents.api",
+                    action: "get",
+                    resource: intentResource
+                }).then(function(reply){
+                    return reply.entity;
+                });
+            }
+            return promiseChain.then(function(response) {
+                res = response;
+                return self.send({
+                    dst: "intents.api",
+                    contentType: response.contentType,
+                    action: "set",
+                    resource: intentResource,
+                    entity: {
+                        handler: {
+                            resource: resource,
+                            address: self.address
+                        },
+                        state: "running"
+                    }
+                });
+            }).then(function(){
+                // Run the intent handler. Wrapped in a promise chain in case the callback itself is async.
+                return callback(res);
+            }).then(function (result) {
+
+                // Respond to the inflight resource
+                return self.send({
+                    dst: "intents.api",
+                    contentType: res.contentType,
+                    action: "set",
+                    resource: intentResource,
+                    entity: {
+                        reply: {
+                            'entity': result || {},
+                            'contentType': res.intent.type
+                        },
+                        state: "complete"
+                    }
+                });
+            })['catch'](function(e){
+                console.log("Error in handling intent: ", e, " -- Clearing in-flight intent node:", intentResource);
+                self.send({
+                    dst: "intents.api",
+                    resource: intentResource,
+                    action: "delete"
+                });
+            });
+        },
+
+        /**
+         * Calls the specific api wrapper given an api name specified.
+         * If the wrapper does not exist it is created.
+         *
+         * @method api
+         * @param apiName {String} The name of the api.
+         * @returns {Function} returns the wrapper call for the given api.
+         */
+        api: function (apiName) {
+            return this.wrapperMap[apiName] || this.updateApi(apiName);
+        },
+        /**
+         * Updates the wrapper map for api use. Whenever functionality is added or removed from the apiMap the
+         * updateApi must be called to reflect said changes on the wrapper map.
+         *
+         * @method updateApi
+         * @param apiName {String} The name of the api
+         * @returns {Function} returns the wrapper call for the given api.
+         */
+        updateApi: function (apiName) {
+            var augment = function (dst, action, client) {
+                return function (resource, fragment, otherCallback) {
+                    // If a fragment isn't supplied argument #2 should be a callback (if supplied)
+                    if (typeof fragment === "function") {
+                        otherCallback = fragment;
+                        fragment = {};
+                    }
+                    var packet = {
+                        'dst': dst,
+                        'action': action,
+                        'resource': resource,
+                        'entity': {}
+                    };
+                    for (var k in fragment) {
+                        packet[k] = fragment[k];
+                    }
+                    if (dst === "intents.api" && action === "register") {
+                        for (var i in client.launchedIntents) {
+                            var loadedResource = '/' + client.launchedIntents[i].entity.intent.type + '/' + client.launchedIntents[i].entity.intent.action;
+                            if (resource === loadedResource) {
+                                client.intentInvocationHandling(resource, client.launchedIntents[i].resource, otherCallback);
+                                delete client.launchedIntents[i];
+                            }
+                        }
+                    }
+                    return client.send(packet, otherCallback);
+                };
+            };
+
+            var wrapper = this.wrapperMap[apiName] || {};
+            if (this.apiMap.hasOwnProperty(apiName)) {
+                var api = this.apiMap[apiName];
+                wrapper = {};
+                for (var i = 0; i < api.actions.length; ++i) {
+                    var action = api.actions[i];
+                    wrapper[action] = augment(api.address, action, this);
+                }
+
+                this.wrapperMap[apiName] = wrapper;
+            }
+            wrapper.apiName = apiName;
+            return wrapper;
+        },
+
+        /**
+         * Sends a packet through the IWC.
+         * Will call the participants sendImpl function.
+         *
+         * @method send
+         * @param {Object} fields properties of the send packet..
+         * @param {Function} callback The Callback for any replies. The callback will be persisted if it returns a truth-like
+         * @param {Function} preexistingPromiseRes If this send already has a promise resolve registration, use it rather than make a new one.
+         * @param {Function} preexistingPromiseRej If this send already has a promise reject registration, use it rather than make a new one.
+         * value, canceled if it returns a false-like value.
+         */
+        send: function (fields, callback, preexistingPromiseRes, preexistingPromiseRej) {
+            var promiseRes = preexistingPromiseRes;
+            var promiseRej = preexistingPromiseRej;
+            var promise = new Promise(function (resolve, reject) {
+
+                if (!promiseRes && !promiseRej) {
+                    promiseRes = resolve;
+                    promiseRej = reject;
+                }
+            });
+
+            if (!(this.isConnected() || fields.dst === "$transport")) {
+                // when send is switched to promises, create the promise first and return it here, as well
+                this.preconnectionQueue.push({
+                    'fields': fields,
+                    'callback': callback,
+                    'promiseRes': promiseRes,
+                    'promiseRej': promiseRej
+                });
+                return promise;
+            }
+
+            var now = new Date().getTime();
+            var id = "p:" + this.msgIdSequence++; // makes the code below read better
+            var packet = {
+                ver: 1,
+                src: this.address,
+                msgId: id,
+                time: now
+            };
+
+            for (var k in fields) {
+                packet[k] = fields[k];
+            }
+
+            var self = this;
+
+            if (callback) {
+                this.registeredCallbacks[id] = function (reply, done) {
+                    // We've received a message that was a promise response but we've aready handled our promise response.
+                    if (reply.src === "$transport" || /(ok).*/.test(reply.response) || /(bad|no).*/.test(reply.response)) {
+                        // Do noting and let it get sent to the event handler
+                        return false;
+                    }else if (reply.entity && reply.entity.inFlightIntent) {
+                        self.intentInvocationHandling(packet.resource, reply.entity.inFlightIntent,
+                            reply.entity.inFlightIntentEntity, callback);
+                    } else {
+                        callback(reply, done);
+                    }
+                    return true;
+                };
+            }
+
+            this.promiseCallbacks[id] = function (reply, done) {
+                if (reply.src === "$transport" || /(ok).*/.test(reply.response)) {
+                    done();
+                    promiseRes(reply);
+                } else if (/(bad|no).*/.test(reply.response)) {
+                    done();
+                    promiseRej(reply);
+                } else {
+                    // it was not a promise callback
+                }
+            };
+
+            this.sendImpl(packet);
+            this.sentBytes += packet.length;
+            this.sentPackets++;
+
+            if (packet.action === "watch") {
+                this.watchMsgMap[id] = packet;
+            } else if (packet.action === "unwatch" && packet.replyTo) {
+                this.cancelRegisteredCallback(packet.replyTo);
+            }
+            return promise;
+        },
+
+        /**
+         * Generic handler for a bus connection to handle any queued messages & launch data after its connected.
+         * @method afterConnected
+         * @returns {Promise}
+         */
+        afterConnected: function(){
+            var self = this;
+            // dump any queued sends, trigger that we are fully connected
+            self.preconnectionQueue.forEach(function (p) {
+                self.send(p.fields, p.callback, p.promiseRes, p.promiseRej);
+            });
+            self.preconnectionQueue = [];
+            if (!self.launchParams.inFlightIntent || self.internal) {
+                self.events.trigger("connected");
+                return Promise.resolve();
+            }
+
+            // fetch the inFlightIntent
+            return self.intents().get(self.launchParams.inFlightIntent).then(function (response) {
+                // If there is an inflight intent that has not already been handled (i.e. page refresh driving to here)
+                if (response && response.entity && response.entity.intent) {
+                    self.launchedIntents.push(response);
+                    var launchData = response.entity.entity || {};
+                    if (response.response === 'ok') {
+                        for (var k in launchData) {
+                            self.launchParams[k] = launchData[k];
+                        }
+                    }
+                    self.intents().set(self.launchParams.inFlightIntent, {
+                        entity: {
+                            state: "complete"
+                        }
+                    });
+                }
+                self.events.trigger("connected");
+            })['catch'](function(e){
+                console.log(self.launchParams.inFlightIntent, " not handled, reason: ", e);
+                self.events.trigger("connected");
+            });
+        }
+
+    };
 };
 var ozpIwc=ozpIwc || {};
 /**
@@ -2701,15 +3353,20 @@ ozpIwc.Event.prototype.off=function(event,callback) {
  *
  * @returns {Object} The event after all handlers have processed it.
  */
-ozpIwc.Event.prototype.trigger=function(eventName,event) {
-	event = event || new ozpIwc.CancelableEvent();
+ozpIwc.Event.prototype.trigger=function(eventName) {
+	//if no event data push a new cancelable event
+	var args = Array.prototype.slice.call(arguments,1);
+	if(args.length < 1){
+		args.push(new ozpIwc.CancelableEvent());
+	}
 	var handlers=this.events[eventName] || [];
 
 	handlers.forEach(function(h) {
-		h(event);
+		h.apply(this,args);
 	});
-	return event;
+	return args[0];
 };
+
 
 
 /**
@@ -2766,6 +3423,28 @@ if(!(window.console && console.log)) {
         error: function(){}
     };
 }
+ozpIwc.object={
+    eachEntry: function(obj,fn,self) {
+        var rv=[];
+        for(var k in obj) {
+            rv.push(fn.call(self,k,obj[k],obj.hasOwnProperty(k)));
+        }
+        return rv;
+    },
+    values:function(obj,filterFn) {
+        filterFn=filterFn || function(key,value) {
+            return true;
+        };
+        var rv=[];
+        for(var k in obj) {
+            if(filterFn(k,obj[k])) {
+                rv.push(obj[k]);
+            }
+        }
+        return rv;
+    }
+};
+
 /**
  *
  * @class packetRouter
@@ -2785,18 +3464,21 @@ ozpIwc.packetRouter = ozpIwc.packetRouter || {};
  */
 ozpIwc.packetRouter.uriTemplate=function(pattern) {
   var fields=[];
-  var regex=new RegExp("^"+pattern.replace(/\{.+?\}|[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, function(match) {
+  var modifiedPattern="^"+pattern.replace(/\{.+?\}|[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, function(match) {
       if(match.length===1) {
           return "\\"+match;
       }
-      var spec=match.slice(1,-1).split(":",2);
-      fields.push(spec[0]);
-      if(spec[1]) {
-          return "("+spec[1]+")";
+      var colon=match.indexOf(":");
+      
+      if(colon > 0) {
+          fields.push(match.slice(1,colon));
+          return "("+match.slice(colon+1,-1)+")";
       } else {
+        fields.push(match.slice(1,-1));
         return "([^\/]+)";
       }
-  })+"$");
+  })+"$";
+  var regex=new RegExp(modifiedPattern);
   
   return function(input) {
      var results=regex.exec(input);
@@ -2837,7 +3519,7 @@ ozpIwc.PacketRouter=function() {
      * @property defaultRoute
      * @returns {*}
      */
-    this.defaultRoute=function() { return false;};
+    this.defaultRoute=function() { return false; };
 
     /**
      * The default scope of the router.
@@ -2866,16 +3548,21 @@ ozpIwc.PacketRouter.prototype.declareRoute=function(config,handler,handlerSelf) 
     if(!config || !config.action || !config.resource) {
         throw new Error("Bad route declaration: "+JSON.stringify(config,null,2));
     }
-    var actionRoute=this.routes[config.action];
-    if(!actionRoute) {
-        actionRoute=this.routes[config.action]=[];
-    }
-    
     config.handler=handler;
     config.filters=config.filters || [];
-    config.handlerSelf=handlerSelf || this.defaultSelf;
+    config.handlerSelf=handlerSelf;
     config.uriTemplate=ozpIwc.packetRouter.uriTemplate(config.resource);
-    actionRoute.push(config);
+    
+    // @TODO FIXME var actions=ozpIwc.util.ensureArray(config.action);
+    var actions=ozpIwc.util.ensureArray(config.action);
+    
+    actions.forEach(function(a) {
+        if(!this.routes.hasOwnProperty(a)) {
+            this.routes[a]=[];
+        }
+    
+        this.routes[a].push(config);
+    },this);
     return this;
 };
 
@@ -2890,15 +3577,25 @@ ozpIwc.PacketRouter.prototype.declareRoute=function(config,handler,handlerSelf) 
  * @param {Array} filters
  * @returns {Function|null} The handler function should all filters pass.
  */
-ozpIwc.PacketRouter.prototype.filterChain=function(packet,context,pathParams,routeSpec,filters) {
+ozpIwc.PacketRouter.prototype.filterChain=function(packet,context,pathParams,routeSpec,thisPointer,filters) {
+  // if there's no more filters to call, just short-circuit the filter chain
   if(!filters.length) {
-    return routeSpec.handler.call(routeSpec.handlerSelf,packet,context,pathParams);
+    return routeSpec.handler.call(thisPointer,packet,context,pathParams);
   }
-  var f=filters.shift();
+  // otherwise, chop off the next filter in queue and return it.
+  var currentFilter=filters.shift();
   var self=this;
-  return f(packet,context,pathParams,function() {
-    return self.filterChain(packet,context,pathParams,routeSpec,filters);
+  var filterCalled=false;
+  var returnValue=currentFilter.call(thisPointer,packet,context,pathParams,function() {
+      filterCalled=true;
+      return self.filterChain(packet,context,pathParams,routeSpec,thisPointer,filters);
   });
+  if(!filterCalled) {
+      ozpIwc.log.info("Filter did not call next() and did not throw an exception",currentFilter);
+  } else {
+      ozpIwc.log.debug("Filter returned ", returnValue);
+  }
+  return returnValue;  
 };
 
 /**
@@ -2907,24 +3604,42 @@ ozpIwc.PacketRouter.prototype.filterChain=function(packet,context,pathParams,rou
  * @method routePacket
  * @param {Object} packet
  * @param {Object} context
- * @returns {*|false} The output of the route's handler. If the specified action does not have any routes false is
+ * @param {Object} routeOverrides - if it exists, this to determine the route instead of the packet
+ * @returns {*} The output of the route's handler. If the specified action does not have any routes false is
  *                    returned. If the specified action does not have a matching route the default route is applied
  */
-ozpIwc.PacketRouter.prototype.routePacket=function(packet,context) {
-    context=context || {};
-    var actionRoutes=this.routes[packet.action];
-    if(!actionRoutes) {
-        return false;
+ozpIwc.PacketRouter.prototype.routePacket=function(packet,context,thisPointer,routeOverrides) {
+    routeOverrides = routeOverrides || {};    
+    var action=routeOverrides.action || packet.action;
+    var resource=routeOverrides.resource || packet.resource;
+    
+    if(!action || !resource) {
+        context.defaultRouteCause="nonRoutablePacket";
+        return this.defaultRoute.call(thisPointer,packet,context,{});                
     }
+    
+    context=context || {};
+    thisPointer=thisPointer || this.defaultSelf;
+    if(!this.routes.hasOwnProperty(action)) {
+        context.defaultRouteCause="noAction";
+        return this.defaultRoute.call(thisPointer,packet,context,{});
+    }
+    var actionRoutes=this.routes[action];
     for(var i=0;i<actionRoutes.length;++i) {
         var route=actionRoutes[i];
-        var pathParams=route.uriTemplate(packet.resource);
+        if(!route) {
+            continue;
+        }
+        var pathParams=route.uriTemplate(resource);
         if(pathParams) {
+            thisPointer=route.handlerSelf || thisPointer;
             var filterList=route.filters.slice();
-            return this.filterChain(packet,context,pathParams,route,filterList);
+            return this.filterChain(packet,context,pathParams,route,thisPointer,filterList);
         }
     }
-    return this.defaultRoute(packet,context,{});
+    // if we made it this far, then we know about the action, but there are no resources for it
+    context.defaultRouteCause="noResource";
+    return this.defaultRoute.call(thisPointer,packet,context,{});        
     
 };
 
@@ -2935,6 +3650,78 @@ ozpIwc.PacketRouter.prototype.routePacket=function(packet,context) {
  */
 ozpIwc.PacketRouter.prototype.declareDefaultRoute=function(handler) {
     this.defaultRoute=handler;
+};
+
+
+/**
+ * Augments the provided class with a class-level router
+ * and routing functions on the prototype.  This allows the use of
+ * "declareRoute" on the class to create routes for all instances of
+ * that class.  All filters and handlers are evaluated using the
+ * instance as "this".
+ * 
+ * Defines:
+ *    classToAugment.declareRoute(routeConfig,handler)
+ *    classToAugment.prototype.routePacket(packet,context);
+ * 
+ * If the instance has a "defaultRoute" member, it will be used as the
+ * default route for packets.
+ * 
+ * Example:
+ *    ozpIwc.PacketRouter.mixin(MyClass);
+ *    
+ *    MyClass.declareRoute({
+ *       action: "get",
+ *       resource: "/foo/{id}"
+ *    },function (packet,context,pathParams) {
+ *       console.log("Foo handler",packet,context,pathParams);     
+ *       return "foo handler";
+ *    });
+ * 
+ *    MyClass.prototype.defaultRoute=function(packet,context) {
+ *      console.log("Default handler",packet,context,pathParams);
+ *      return "default!";
+ *    };
+ * 
+ *    var instance=new MyClass();
+ *
+ *    var packet1={ resource: "/foo/123", action: "get", ...}
+ *    var rv=instance.routePacket(packet1,{ bar: 2});
+ *    // console output: Foo handler, packet1, {bar:2}, {id: 123}
+ *    // rv === "foo handler"
+ *    
+ *    var packet2={ resource: "/dne/123", action: "get", ...}
+ *    rv=instance.routePacket(packet2,{ bar: 3});
+ *    // console output: Default handler, packet2, {bar:3}
+ *    // rv === "default!"
+ * 
+ * @param {type} classToAugment
+ * @returns {undefined}
+ */
+ozpIwc.PacketRouter.mixin=function(classToAugment) {
+    var packetRouter=new ozpIwc.PacketRouter();
+    
+    var superClass=Object.getPrototypeOf(classToAugment.prototype);
+    if(superClass && superClass.routePacket) {
+        packetRouter.defaultRoute=function(packet,context) {
+            return superClass.routePacket.apply(this,arguments);
+        };
+    } else {
+        packetRouter.defaultRoute=function(packet,context) {
+            if(this.defaultRoute) {
+                return this.defaultRoute.apply(this,arguments);
+            } else {
+                return false;
+            }
+        };
+    }
+    classToAugment.declareRoute=function(config,handler) {
+        packetRouter.declareRoute(config,handler);
+    };
+    
+    classToAugment.prototype.routePacket=function(packet,context) {
+        return packetRouter.routePacket(packet,context,this);  
+    };
 };
 /**
  * @submodule common
@@ -2957,6 +3744,97 @@ ozpIwc.util=ozpIwc.util || {};
 ozpIwc.util.now=function() {
     return new Date().getTime();
 };
+
+/**
+ * Applies the template using the supplied object for values
+ *
+ * @method resolveUriTemplate
+ * @param {string} template The template to use
+ * @param {Object} obj The object to get template paramters from
+ * @param {Object} fallback A secondary object for parameters not contained by the first
+ * @returns {Number}
+ */
+ozpIwc.util.resolveUriTemplate=function(template,obj,fallback) {
+	var converters={
+		"+": function(a) { return a;},
+		"": function(a) { return encodeURIComponent(a);}
+	};
+	var t=template.replace(/\{([\+\#\.\/\;\?\&]?)(.+?)\}/g,function(match,type,name) {
+			return converters[type](obj[name] || fallback[name]);
+		});
+	// look for the :// of the protocol
+	var protocolOffset=t.indexOf("://");
+	// if we found it, set the offset to the end.  otherwise, leave it
+	// at -1 so that a leading "//" will be replaced, below
+	if(protocolOffset >0) { protocolOffset+=3; }
+	
+	// remove double // that show up after the protocolOffset
+	return t.replace(/\/\//g,function(m,offset){
+			// only swap it after the protocol
+			if(offset > protocolOffset) {
+				return "/";
+			} else {
+				return m;
+			}
+		});
+};
+
+/**
+ * A record of event listeners used in the given IWC context. Grouped by type.
+ *
+ * @property eventListeners
+ * @static
+ * @type {Object}
+ */
+ozpIwc.util.eventListeners={};
+
+/**
+ * Adds an event listener to the window and stores its listener in ozpIwc.util.eventListeners.
+ *
+ * @method addEventListener
+ * @param {String} type the event to listen to
+ * @param {Function} listener the callback to be used upon the event being emitted
+ */
+ozpIwc.util.addEventListener=function(type,listener) {
+    var l=ozpIwc.util.eventListeners[type];
+    if(!l) {
+        l=ozpIwc.util.eventListeners[type]=[];
+    }
+    l.push(listener);
+    window.addEventListener(type,listener);
+};
+
+/**
+ * Removes an event listener from the window and from ozpIwc.util.eventListeners
+ * @param {String} type the event to remove the listener from
+ * @param {Function} listener the callback to unregister
+ */
+ozpIwc.util.removeEventListener=function(type,listener) {
+    var l=ozpIwc.util.eventListeners[type];
+    if(l) {
+        ozpIwc.util.eventListeners[type]=l.filter(function(v) { return v!==listener;});
+    }
+    window.removeEventListener(type,listener);
+};
+
+/**
+ * Removes all event listeners registered in ozpIwc.util.eventListeners
+ * @param {String} type the event to remove the listener from
+ * @param {Function} listener the callback to unregister
+ * @param {Boolean} [useCapture] if true all events of the specified type will be dispatched to the registered listener
+ *                             before being dispatched to any EventTarget beneath it in the DOM tree. Events which
+ *                             are bubbling upward through the tree will not trigger a listener designated to use
+ *                             capture.
+ */
+ozpIwc.util.purgeEventListeners=function() {
+    ozpIwc.object.eachEntry(ozpIwc.util.eventListeners,function(type,listenerList) {
+        listenerList.forEach(function(listener) {
+            window.removeEventListener(type,listener);
+        });
+    });
+    ozpIwc.util.eventListeners={};
+};
+
 
 /**
  * Create a class with the given parent in it's prototype chain.
@@ -2998,7 +3876,7 @@ ozpIwc.util.safePostMessage = function(window,msg,origin) {
         try {
             window.postMessage(JSON.stringify(msg), origin);
         } catch (e) {
-            ozpIwc.util.log("Invalid call to window.postMessage: " + e.message);
+            ozpIwc.log.debug("Invalid call to window.postMessage: " + e.message);
         }
     }
 };
@@ -3063,36 +3941,6 @@ ozpIwc.util.clone=function(value) {
 };
 
 /**
- * Non serializable cloning. Used to include prototype functions in the cloned object by creating a new instance
- * and copying over any attributes.
- * @method protoClone
- * @param {Object|Array} obj
- * @returns {*|Array.<T>|string|Blob}
- */
-ozpIwc.util.protoClone = function(obj) {
-
-    if (obj instanceof Array) {
-        return obj.slice();
-    }
-
-    // Handle Object
-    if (obj instanceof Object) {
-        var clone = new obj.constructor();
-        for(var i in obj){
-
-            if(obj.hasOwnProperty(i)){
-                //recurse if needed
-                clone[i] = ozpIwc.util.protoClone(obj[i]);
-            } else{
-                clone[i] = obj[i];
-            }
-        }
-        return clone;
-    }
-    return obj;
-};
-
-/**
  * A regex method to parse query parameters.
  *
  * @method parseQueryParams
@@ -3108,6 +3956,83 @@ ozpIwc.util.parseQueryParams=function(query) {
 		params[match[1]]=decodeURIComponent(match[2]);
 	}
     return params;
+};
+
+/**
+ * Adds params to the query string of the given url. Accepts objects, preformed query strings, and arrays of query
+ * params.
+ *
+ * @method addQueryParams
+ * @param {String} url
+ * @param {String|Object|Array} params
+ * @returns {String}
+ */
+ozpIwc.util.addQueryParams=function(url,params){
+    if(typeof url !== "string") { throw new Error("url should be a string."); }
+
+    var formattedParams = {};
+    switch(typeof params){
+        case "object":
+            // if in array form ["a=true","b=en_us",...]
+            if(Array.isArray(params)){
+                if(params.length === 0){
+                    return url;
+                }
+                for(var i in params){
+                    if(typeof params[i] === "string") {
+                        var p = ozpIwc.util.parseQueryParams(params[i]);
+                        for(var j in p){
+                            formattedParams[j] = p[j];
+                        }
+                    }
+                }
+            } else {
+                if(Object.keys(params).length === 0){
+                    return url;
+                }
+                // if in object form {a:true, b:"en_us",...}
+                formattedParams = params;
+            }
+            break;
+        case "undefined":
+            return url;
+
+        default:
+            if(params.length === 0) {
+                return url;
+            }
+            // if in string form "?a=true&b=en_us&..."
+            formattedParams = ozpIwc.util.parseQueryParams(params);
+            break;
+    }
+    var hash = "";
+    // Separate the hash temporarily (if exists)
+    var hashSplit = url.split("#");
+    if(hashSplit.length > 2){
+        throw new Error("Invalid url.");
+    } else {
+        url = hashSplit[0];
+        hash = hashSplit[1] || "";
+    }
+
+    //if the url has no query params  we append the initial "?"
+    if(url.indexOf("?") === -1) {
+        url += "?";
+    } else {
+        url += "&";
+    }
+    //skip on first iteration
+    var ampersand = "";
+    for(var k in formattedParams){
+        url += ampersand + k +"=" + formattedParams[k];
+        ampersand = "&";
+    }
+
+    if(hash.length > 0){
+        url += "#" + hash;
+    }
+
+    return url;
 };
 
 /**
@@ -3190,112 +4115,6 @@ ozpIwc.util.isIWCPacket=function(packet) {
     }
 };
 
-/**
- * Returns true if the the given document node is a direct descendant of the parent node.
- * @method isDirectDescendant
- * @param parent
- * @param child
- * @returns {boolean}
- */
-ozpIwc.util.isDirectDescendant = function(child,parent){
-    if (child.parentNode === parent) {
-        return true;
-    }
-    return false;
-};
-
-/**
- *
- * @param {Object} config
- * @param {Array<String>} config.reqAttrs
- * @param {Array<String>} config.optAttrs
- * @param {Array<String>} config.reqNodes
- * @param {Array<String>} config.optNodes
- */
-ozpIwc.util.elementParser = function(config){
-    config = config || {};
-
-    config.reqAttrs = config.reqAttrs || [];
-    config.optAttrs = config.optAttrs || [];
-    config.reqNodes = config.reqNodes || [];
-    config.optNodes = config.optNodes || [];
-
-    var element = config.element || {};
-
-    var findings = {
-        attrs: {},
-        nodes: {}
-    };
-    config.reqAttrs.forEach(function(attr){
-        var attribute = element.getAttribute(attr);
-        if(attribute){
-//            console.log('Found attribute of policy,(',attr,',',attribute,')');
-            findings.attrs[attr] = attribute;
-        } else {
-            console.error('Required attribute not found,(',attr,')');
-        }
-
-    });
-
-    config.optAttrs.forEach(function(attr){
-        var attribute = element.getAttribute(attr);
-        if(attribute){
-//            console.log('Found attribute of policy,(',attr,',',attribute,')');
-            findings.attrs[attr] = attribute;
-        }
-
-    });
-
-    config.reqNodes.forEach(function(tag){
-        var nodes = element.getElementsByTagName(tag);
-        findings.nodes[tag] = findings.nodes[tag] || [];
-        for(var i in nodes){
-            if(ozpIwc.util.isDirectDescendant(nodes[i],element)){
-//                console.log('Found node of policy: ', nodes[i]);
-                findings.nodes[tag].push(nodes[i]);
-            }
-        }
-        if(findings.nodes[tag].length <= 0) {
-            console.error('Required node not found,(',tag,')');
-        }
-    });
-    config.optNodes.forEach(function(tag){
-        var nodes = element.getElementsByTagName(tag);
-        for(var i in nodes){
-            if(ozpIwc.util.isDirectDescendant(nodes[i],element)){
-//                console.log('Found node of policy: ', nodes[i]);
-                findings.nodes[tag] = findings.nodes[tag] || [];
-                findings.nodes[tag].push(nodes[i]);
-            }
-        }
-    });
-    return findings;
-};
-
-ozpIwc.util.camelCased = function(string){
-    return string.charAt(0).toLowerCase() + string.substring(1);
-};
-
-/**
- * Shortened call for returning a resolving promise (cleans up promise chaining)
- * @param {*} obj any valid javascript to resolve with.
- * @returns {Promise}
- */
-ozpIwc.util.resolveWith = function(obj){
-    return new Promise(function(resolve,reject){
-        resolve(obj);
-    });
-};
-/**
- * Shortened call for returning a rejecting promise (cleans up promise chaining)
- * @param {*} obj any valid javascript to reject with.
- * @returns {Promise}
- */
-ozpIwc.util.rejectWith = function(obj){
-    return new Promise(function(resolve,reject){
-        reject(obj);
-    });
-};
 
 /**
  * Returns the version of Internet Explorer or a -1
@@ -3307,7 +4126,7 @@ ozpIwc.util.getInternetExplorerVersion= function() {
     if (navigator.appName === 'Microsoft Internet Explorer')
     {
         var ua = navigator.userAgent;
-        var re  = new RegExp("MSIE ([0-9]{1,}[\.0-9]{0,})");
+        var re  = /MSIE ([0-9]{1,}[\.0-9]{0,})/;
         if (re.exec(ua) !== null) {
             rv = parseFloat(RegExp.$1);
         }
@@ -3325,31 +4144,30 @@ var ozpIwc=ozpIwc || {};
  * This class will be heavily modified in the future.
  * @class Client
  * @namespace ozpIwc
- *
+ * @constructor
+ * @uses ozpIwc.ApiPromiseMixin
  * @todo accept a list of peer URLs that are searched in order of preference
  * @param {Object} config
  * @param {String} config.peerUrl - Base URL of the peer server
+ * @param {Object} config.params - Parameters that will be passed to the bus.
+ * @param {String} config.params.log - The IWC bus logging level.  One of "NONE","DEFAULT","ERROR","INFO","DEBUG", or "ALL"
  * @param {Boolean} [config.autoConnect=true] - Whether to automatically find and connect to a peer
  */
 ozpIwc.Client=function(config) {
     config=config || {};
 
-    /**
-     * The address assigned to this client.
-     * @property address
-     * @type String
-     */
-    this.address="$nobody";
+    ozpIwc.util.addEventListener('beforeunload',this.disconnect);
+    this.genPeerUrlCheck(config.peerUrl);
+    ozpIwc.ApiPromiseMixin(this,config.autoConnect);
+};
 
-    /**
-     * Key value store of callback functions for the client to act upon when receiving a reply via the IWC.
-     * @property promiseCallbacks
-     * @type Object
-     */
-    this.promiseCallbacks={};
-    // coerce config.peerUrl to a function
-    
-    var configUrl=config.peerUrl;
+/**
+ * Generates the Peer URL checking logic based on the data type received.
+ * @method genPeerUrlCheck
+ * @property {String|Array|Function} configUrl the url(s) to connect the client on. If function, the output of the
+ *                                   function will be used.
+ */
+ozpIwc.Client.prototype.genPeerUrlCheck = function(configUrl){
     if(typeof(configUrl) === "string") {
         this.peerUrlCheck=function(url,resolve) {
             if(typeof url !== 'undefined'){
@@ -3375,423 +4193,6 @@ ozpIwc.Client=function(config) {
     } else {
         throw new Error("PeerUrl must be a string, array of strings, or function");
     }
-
-    /**
-     * @property autoConnect
-     * @type {Boolean}
-     * @default true
-     */
-    this.autoConnect=("autoConnect" in config) ? config.autoConnect : true;
-
-    /**
-     * @property msgIdSequence
-     * @type Number
-     * @default 0
-     */
-    this.msgIdSequence=0;
-
-    /**
-     * An events module for the Client
-     * @property events
-     * @type ozpIwc.Event
-     */
-    this.events=new ozpIwc.Event();
-    this.events.mixinOnOff(this);
-
-    /**
-     * @property receivedPackets
-     * @type Number
-     * @default 0
-     */
-    this.receivedPackets=0;
-
-    /**
-     * @property receivedBytes
-     * @type Number
-     * @default 0
-     */
-    this.receivedBytes=0;
-
-    /**
-     * @property sentPackets
-     * @type Number
-     * @default 0
-     */
-    this.sentPackets=0;
-
-    /**
-     * @property sentBytes
-     * @type Number
-     * @default 0
-     */
-    this.sentBytes=0;
-
-    /**
-     * The epoch time the Client was instantiated.
-     * @property startTime
-     * @type Number
-     */
-    this.startTime=ozpIwc.util.now();
-
-    /**
-     * @property launchParams
-     * @type Object
-     * @default {}
-     */
-    this.launchParams={};
-    
-    this.readLaunchParams(window.name);
-    this.readLaunchParams(window.location.search);
-    this.readLaunchParams(window.location.hash);
-    
-    /**
-     * A map of available apis and their actions.
-     * @property apiMap
-     * @type Object
-     */
-    this.apiMap= ozpIwc.apiMap || {};
-
-    /**
-     * @property wrapperMap
-     * @type Object
-     * @default {}
-     */
-    this.wrapperMap={};
-
-
-    /**
-     * @property preconnectionQueue
-     * @type Array
-     * @default []
-     */
-    this.preconnectionQueue=[];
-
-    /**
-     * @property watchMsgMap
-     * @type Object
-     * @default {}
-     */
-    this.watchMsgMap = {};
-    this.registeredCallbacks = {};
-
-
-    /**
-     * @property launchedIntents
-     * @type Array
-     * @default []
-     */
-    this.launchedIntents = [];
-
-    this.constructApiFunctions();
-
-    window.addEventListener('beforeunload',this.disconnect);
-
-    if(this.autoConnect) {
-        this.connect();
-    }
-
-
-};
-
-/**
- * Parses launch parameters based on the raw string input it receives.
- *
- * @method readLaunchParams
- * @param {String} rawString
- */
-ozpIwc.Client.prototype.readLaunchParams=function(rawString) {
-    // of the form ozpIwc.VARIABLE=VALUE, where:
-    //   VARIABLE is alphanumeric + "_"
-    //   VALUE does not contain & or #
-    var re=/ozpIwc.(\w+)=([^&#]+)/g;
-    var m;
-    while((m=re.exec(rawString)) !== null) {
-        var params = decodeURIComponent(m[2]);
-        try{
-            params = JSON.parse(params);
-        } catch(e){
-            // ignore the errors and just pass through the string
-        }
-        this.launchParams[m[1]]=params;
-    }
-};
-/**
- * Receive a packet from the connected peer.  If the packet is a reply, then
- * the callback for that reply is invoked.  Otherwise, it fires a receive event
- *
- * Fires:
- *     - {{#crossLink "ozpIwc.Client/receive:event}}{{/crossLink}}
- *
- * @method receive
- * @protected
- * @param {ozpIwc.TransportPacket} packet
- */
-ozpIwc.Client.prototype.receive=function(packet) {
-    var handled = false;
-
-    //Try and handle this packet as a reply message
-    if(packet.src === "$transport" || (packet.replyTo && this.promiseCallbacks[packet.replyTo])) {
-
-        var replyCancel = false;
-        var replyDone=function() {
-            replyCancel = true;
-        };
-        this.promiseCallbacks[packet.replyTo](packet,replyDone);
-
-        if (replyCancel) {
-            this.cancelPromiseCallback(packet.replyTo);
-            handled = true;
-        }
-
-    }
-
-    //Try and handle this packet as callback message
-    if(!handled && packet.replyTo && this.registeredCallbacks[packet.replyTo]){
-        handled = true;
-
-        var registeredCancel = false;
-        var registeredDone=function() {
-            registeredCancel = true;
-        };
-
-        this.registeredCallbacks[packet.replyTo](packet,registeredDone);
-        if (registeredCancel) {
-            if(this.watchMsgMap[packet.replyTo].action === "watch") {
-                this.api(this.watchMsgMap[packet.replyTo].dst).unwatch(this.watchMsgMap[packet.replyTo].resource);
-            }
-            this.cancelRegisteredCallback(packet.replyTo);
-        }
-    }
-
-    // Otherwise trigger "receive" for someone to handle it
-    if(!handled){
-        /**
-         * Fired when the client receives a packet.
-         * @event #receive
-         */
-        this.events.trigger("receive",packet);
-    }
-};
-/**
- * Sends a packet through the IWC.
- *
- * @method send
- * @param {String} dst Where to send the packet.
- * @param {Object} entity  The payload of the packet.
- * @param {Function} callback The Callback for any replies. The callback will be persisted if it returns a truth-like
- * value, canceled if it returns a false-like value.
- */
-ozpIwc.Client.prototype.send=function(fields,callback,preexistingPromiseRes,preexistingPromiseRej) {
-    var promiseRes = preexistingPromiseRes;
-    var promiseRej = preexistingPromiseRej;
-    var promise =  new Promise(function(resolve,reject){
-
-        if(!promiseRes && !promiseRej){
-            promiseRes = resolve;
-            promiseRej = reject;
-        }
-    });
-
-    if(!(this.isConnected() || fields.dst==="$transport")) {
-        // when send is switched to promises, create the promise first and return it here, as well
-        this.preconnectionQueue.push({
-            'fields': fields,
-            'callback': callback,
-            'promiseRes': promiseRes,
-            'promiseRej': promiseRej
-        });
-        return promise;
-    }
-
-    var now=new Date().getTime();
-    var id="p:"+this.msgIdSequence++; // makes the code below read better
-    var packet={
-        ver: 1,
-        src: this.address,
-        msgId: id,
-        time: now
-    };
-
-    for(var k in fields) {
-        packet[k]=fields[k];
-    }
-
-    var self = this;
-
-    if(callback) {
-        this.registeredCallbacks[id] = function (reply, done) {
-            if(reply.entity && reply.entity.inFlightIntent) {
-                self.intentInvocationHandling(packet.resource,reply.entity.inFlightIntent,callback);
-            } else {
-                callback(reply, done);
-            }
-        };
-    }
-
-    this.promiseCallbacks[id]=function (reply,done) {
-        if (reply.src === "$transport" || /(ok).*/.test(reply.response)) {
-            done();
-            promiseRes(reply);
-        } else if (/(bad|no).*/.test(reply.response)) {
-            done();
-            promiseRej(reply);
-        } else {
-            // it was not a promise callback
-        }
-    };
-
-    ozpIwc.util.safePostMessage(this.peer,packet,'*');
-    this.sentBytes+=packet.length;
-    this.sentPackets++;
-
-    if(packet.action === "watch") {
-        this.watchMsgMap[id] = packet;
-    } else if(packet.action === "unwatch" && packet.replyTo) {
-        this.cancelRegisteredCallback(packet.replyTo);
-    }
-    return promise;
-};
-
-/**
- * Builds the client api calls from the values in client.apiMap
- *
- * @method constructApiFunctions
- */
-ozpIwc.Client.prototype.constructApiFunctions = function(){
-    for (var api in this.apiMap) {
-        var apiObj = this.apiMap[api];
-        var apiFuncName = apiObj.address.replace('.api', '');
-
-        //prevent overriding client constructed fields, but allow updating of constructed APIs
-        if (!this.hasOwnProperty(apiFuncName) || this.apiMap[api].functionName === apiFuncName) {
-            // wrap this in a function to break the closure
-            // on apiObj.address that would otherwise register
-            // everything for the last api in the list
-            /*jshint loopfunc:true*/
-            (function (self,addr) {
-                self[apiFuncName] = function () {
-                    return self.api(addr);
-                };
-                self.apiMap[addr] = self.apiMap[addr] || {};
-                self.apiMap[addr].functionName = apiFuncName;
-                self.updateApi(addr);
-            })(this,apiObj.address);
-        }
-    }
-};
-
-/**
- * Calls the names.api to gather the /api/* resources to gain knowledge of available api actions of the current bus.
- *
- * @method gatherApiInformation
- * @returns {Promise}
- */
-ozpIwc.Client.prototype.gatherApiInformation = function(){
-    var self = this;
-    // gather api information
-    return this.send({
-        dst: "names.api",
-        action: "get",
-        resource: "/api"
-    }).then(function(reply){
-        if(reply.response === 'ok'){
-            return reply.entity;
-        } else {
-            throw reply.response;
-        }
-    }).then(function(apis) {
-        var promiseArray = [];
-        apis.forEach(function (api) {
-            var promise = self.send({
-                dst: "names.api",
-                action: "get",
-                resource: api
-            }).then(function (res) {
-                if (res.response === 'ok') {
-                    var name = api.replace('/api/', '');
-                    self.apiMap[name] = self.apiMap[name] || {};
-                    self.apiMap[name].address =  name;
-                    self.apiMap[name].actions = res.entity.actions;
-                } else {
-                    throw res.response;
-                }
-            });
-            promiseArray.push(promise);
-        });
-        return Promise.all(promiseArray);
-    });
-};
-
-/**
- * Returns whether or not the Client is connected to the IWC bus.
- *
- * @method isConnected
- * @returns {Boolean}
- */
-ozpIwc.Client.prototype.isConnected=function(){
-    return this.address !== "$nobody";
-};
-
-/**
- * Cancel a reply callback registration.
- * @method cancelPromiseCallback
- * @param (String} msgId The packet replyTo ID for which the callback was registered.
- *
- * @return {Boolean} True if the cancel was successful, otherwise false.
- */
-ozpIwc.Client.prototype.cancelPromiseCallback=function(msgId) {
-    var success=false;
-    if (msgId) {
-        delete this.promiseCallbacks[msgId];
-        success=true;
-    }
-    return success;
-};
-
-/**
- * Cancel a watch callback registration.
- *
- * @method cancelRegisteredCallback
- * @param (String} msgId The packet replyTo ID for which the callback was registered.
- *
- * @return {Boolean} True if the cancel was successful, otherwise false.
- */
-ozpIwc.Client.prototype.cancelRegisteredCallback=function(msgId) {
-    var success=false;
-    if (msgId) {
-        delete this.registeredCallbacks[msgId];
-        delete this.watchMsgMap[msgId];
-        success=true;
-    }
-    return success;
-};
-
-/**
- * Registers callbacks
- *
- * @method on
- * @param {String} event The event to call the callback on.
- * @param {Function} callback The function to be called.
- *
- */
-ozpIwc.Client.prototype.on=function(event,callback) {
-    if(event==="connected" && this.isConnected()) {
-        callback(this);
-        return;
-    }
-    return this.events.on.apply(this.events,arguments);
-};
-
-/**
- * De-registers callbacks
- *
- * @method off
- * @param {String} event The event to call the callback on.
- * @param {Function} callback The function to be called.
- *
- */
-ozpIwc.Client.prototype.off=function(event,callback) {
-    return this.events.off.apply(this.events,arguments);
 };
 
 /**
@@ -3800,15 +4201,13 @@ ozpIwc.Client.prototype.off=function(event,callback) {
  * @method disconnect
  */
 ozpIwc.Client.prototype.disconnect=function() {
-    this.promiseCallbacks={};
-    this.registeredCallbacks={};
-    window.removeEventListener("message",this.postMessageHandler,false);
-    this.connectPromise = null;
+    this.events.trigger("disconnect");
+    
     if(this.iframe) {
         this.iframe.src = "about:blank";
         var self = this;
         window.setTimeout(function(){
-            document.body.removeChild(self.iframe);
+            self.iframe.remove();
             self.iframe = null;
         },0);
     }
@@ -3841,7 +4240,7 @@ ozpIwc.Client.prototype.connect=function() {
             return self.createIframePeer();
         }).then(function() {
             // start listening to the bus and ask for an address
-            this.postMessageHandler = function (event) {
+            self.postMessageHandler = function (event) {
                 if (event.origin !== self.peerOrigin) {
                     return;
                 }
@@ -3850,7 +4249,8 @@ ozpIwc.Client.prototype.connect=function() {
                     if (typeof(message) === 'string') {
                         message = JSON.parse(event.data);
                     }
-                    self.receive(message);
+                    // Calls APIPromiseMixin receive handler
+                    self.receiveFromRouterImpl(message);
                     self.receivedBytes += (event.data.length * 2);
                     self.receivedPackets++;
                 } catch (e) {
@@ -3858,7 +4258,7 @@ ozpIwc.Client.prototype.connect=function() {
                 }
             };
             // receive postmessage events
-            window.addEventListener("message", this.postMessageHandler, false);
+            ozpIwc.util.addEventListener("message", self.postMessageHandler);
             return self.send({dst: "$transport"});
         }).then(function(message) {
             self.address = message.dst;
@@ -3869,40 +4269,10 @@ ozpIwc.Client.prototype.connect=function() {
              */
             self.events.trigger("gotAddress", self);
 
-            // dump any queued sends, trigger that we are fully connected
-            self.preconnectionQueue.forEach(function (p) {
-                self.send(p.fields, p.callback, p.promiseRes, p.promiseRej);
-            });
-            self.preconnectionQueue = [];
-
-            if (!self.launchParams.inFlightIntent) {
-                return;
-            }
-
-            // fetch the inFlightIntent
-            var packet = {
-                dst: "intents.api",
-                resource: self.launchParams.inFlightIntent,
-                action: "get"
-            };
-            return self.send(packet);
-        }).then(function (response) {
-            if(response) {
-                self.launchedIntents.push(response);
-                if (response.response === 'ok') {
-                    for (var k in response.entity) {
-                        self.launchParams[k] = response.entity[k];
-                    }
-                }
-            }
-            /**
-             * Fired when the client is connected to the IWC bus.
-             * @event #connected
-             */
-            self.events.trigger("connected");
+            return self.afterConnected();
         });
     }
-    return this.connectPromise; 
+    return this.connectPromise;
 };
 
 /**
@@ -3918,7 +4288,11 @@ ozpIwc.Client.prototype.createIframePeer=function() {
             self.iframe.addEventListener("load",function() {
                 resolve();
             });
-            self.iframe.src=self.peerUrl+"/iframe_peer.html";
+						var url=self.peerUrl+"/iframe_peer.html";
+						if(self.launchParams.log) {
+							url+="?log="+self.launchParams.log;
+						}
+            self.iframe.src=url;
             self.iframe.height=1;
             self.iframe.width=1;
             self.iframe.setAttribute("area-hidden",true);
@@ -3933,123 +4307,13 @@ ozpIwc.Client.prototype.createIframePeer=function() {
         if(document.readyState === 'complete' ) {
             createIframeShim();
         } else {
-            window.addEventListener("load",createIframeShim,false);
+            ozpIwc.util.addEventListener("load",createIframeShim);
         }
     });
 };
 
-/**
- * Handles intent invocation packets. Communicates back with the intents.api to operate the in flight intent state
- * machine.
- *
- * @method intentInvocationHandling
- * @param resource {String} The resource of the packet that sent the intent invocation
- * @param intentResource {String} The in flight intent resource, used internally to operate the in flight intent state machine
- * @param callback {Function} The intent handler's callback function
- * @returns {Promise}
- */
-ozpIwc.Client.prototype.intentInvocationHandling = function(resource,intentResource,callback) {
-    var self = this;
-    var res;
-    return self.send({
-        dst: "intents.api",
-        action: "get",
-        resource: intentResource
-    }).then(function (response) {
-        response.entity.handler = {
-            address: self.address,
-            resource: resource
-        };
-        response.entity.state = "running";
-
-        res = response;
-        return self.send({
-            dst: "intents.api",
-            contentType: response.contentType,
-            action: "set",
-            resource: intentResource,
-            entity: response.entity
-        });
-    }).then(function (reply) {
-        //Now run the intent
-        res.entity.reply.entity = callback(res.entity) || {};
-        // then respond to the inflight resource
-        res.entity.state = "complete";
-        res.entity.reply.contentType = res.entity.intent.type;
-        return self.send({
-            dst: "intents.api",
-            contentType: res.contentType,
-            action: "set",
-            resource: intentResource,
-            entity: res.entity
-        });
-    });
-};
-
-/**
- * Calls the specific api wrapper given an api name specified.
- * If the wrapper does not exist it is created.
- *
- * @method api
- * @param apiName {String} The name of the api.
- * @returns {Function} returns the wrapper call for the given api.
- */
-ozpIwc.Client.prototype.api=function(apiName) {
-    return this.wrapperMap[apiName] || this.updateApi(apiName);
-};
-
-
-/**
- * Updates the wrapper map for api use. Whenever functionality is added or removed from the apiMap the
- * updateApi must be called to reflect said changes on the wrapper map.
- *
- * @method updateApi
- * @param apiName {String} The name of the api
- * @returns {Function} returns the wrapper call for the given api.
- */
-ozpIwc.Client.prototype.updateApi = function(apiName){
-    var augment = function (dst,action,client) {
-        return function (resource, fragment, otherCallback) {
-            // If a fragment isn't supplied argument #2 should be a callback (if supplied)
-            if(typeof fragment === "function"){
-                otherCallback = fragment;
-                fragment = {};
-            }
-            var packet = {
-                'dst': dst,
-                'action': action,
-                'resource': resource,
-                'entity': {}
-            };
-            for (var k in fragment) {
-                packet[k] = fragment[k];
-            }
-            if(dst === "intents.api" && action === "register"){
-                for(var i in client.launchedIntents){
-                    var loadedResource = '/' + client.launchedIntents[i].entity.intent.type + '/' + client.launchedIntents[i].entity.intent.action;
-                    if(resource === loadedResource){
-                        client.intentInvocationHandling(resource,client.launchedIntents[i].resource,otherCallback);
-                        delete client.launchedIntents[i];
-                    }
-                }
-            }
-            return client.send(packet,otherCallback);
-        };
-    };
-
-    var wrapper=this.wrapperMap[apiName] || {};
-    if(this.apiMap.hasOwnProperty(apiName)) {
-        var api = this.apiMap[apiName];
-        wrapper = {};
-        for (var i = 0; i < api.actions.length; ++i) {
-            var action = api.actions[i];
-            wrapper[action] = augment(api.address, action, this);
-        }
-
-        this.wrapperMap[apiName] = wrapper;
-    }
-    wrapper.apiName=apiName;
-    return wrapper;
+ozpIwc.Client.prototype.sendImpl = function(packet){
+    ozpIwc.util.safePostMessage(this.peer, packet, '*');
 };
 //# sourceMappingURL=ozpIwc-client.js.map
 //Return the ozpIwc object
