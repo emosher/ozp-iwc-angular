@@ -8,7 +8,6 @@
     "dist/js/ozpIwc-metrics-angular.js",
     "dist/js/ozpIwc-metrics-angular.min.js"
   ],
-  "version": "0.0.1",
   "homepage": "https://github.com/ozone-development/ozp-iwc-angular",
   "authors": [
     "Ozone Developers"
